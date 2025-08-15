@@ -32,8 +32,14 @@ cryptography==45.0.6
     # via pdfminer-six
 distro==1.9.0
     # via openai
+dotenv==0.9.9
+    # via -r requirements.in
 fastapi==0.116.1
     # via -r requirements.in
+filelock==3.19.1
+    # via huggingface-hub
+fsspec==2025.7.0
+    # via huggingface-hub
 greenlet==3.2.4
     # via sqlalchemy
 h11==0.16.0
@@ -46,6 +52,10 @@ httpx==0.28.1
     # via
     #   langsmith
     #   openai
+huggingface-hub==0.34.4
+    # via
+    #   langchain-huggingface
+    #   tokenizers
 idna==3.10
     # via
     #   anyio
@@ -62,7 +72,13 @@ langchain==0.3.27
 langchain-core==0.3.74
     # via
     #   langchain
+    #   langchain-huggingface
+    #   langchain-openai
     #   langchain-text-splitters
+langchain-huggingface==0.3.1
+    # via -r requirements.in
+langchain-openai==0.3.30
+    # via -r requirements.in
 langchain-text-splitters==0.3.9
     # via langchain
 langsmith==0.4.14
@@ -74,11 +90,14 @@ numpy==2.3.2
     #   -r requirements.in
     #   scipy
 openai==1.99.9
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   langchain-openai
 orjson==3.11.2
     # via langsmith
 packaging==25.0
     # via
+    #   huggingface-hub
     #   langchain-core
     #   langsmith
 pdfminer-six==20250506
@@ -103,16 +122,20 @@ pymupdf==1.26.3
     # via -r requirements.in
 pypdfium2==4.30.0
     # via pdfplumber
+python-dotenv==1.1.1
+    # via dotenv
 python-multipart==0.0.20
     # via -r requirements.in
 pyyaml==6.0.2
     # via
+    #   huggingface-hub
     #   langchain
     #   langchain-core
 regex==2025.7.34
     # via tiktoken
 requests==2.32.4
     # via
+    #   huggingface-hub
     #   langchain
     #   langsmith
     #   requests-toolbelt
@@ -132,13 +155,20 @@ starlette==0.47.2
 tenacity==9.1.2
     # via langchain-core
 tiktoken==0.11.0
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   langchain-openai
+tokenizers==0.21.4
+    # via langchain-huggingface
 tqdm==4.67.1
-    # via openai
+    # via
+    #   huggingface-hub
+    #   openai
 typing-extensions==4.14.1
     # via
     #   anyio
     #   fastapi
+    #   huggingface-hub
     #   langchain-core
     #   openai
     #   pydantic

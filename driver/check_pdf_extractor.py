@@ -1,16 +1,14 @@
 from app.tools.local.pdf_extractor import extract_pdf_text
 
-def test_pdf_extraction():
+def check_pdf_extraction():
     path = "../data/ddpm.pdf"
-    text = extract_pdf_text(path)
+    sections = extract_pdf_text(path)
+    assert len(sections) > 0, "No text extracted — is the PDF scanned or empty?"
 
-    print("Extracted text:")
-    print("-" * 50)
-    print(text[:1000])  # Print the first 1000 characters
-    print("-" * 50)
-
-    assert len(text) > 0, "No text extracted — is the PDF scanned or empty?"
+    for name, content in sections.items():
+        print(f"\n--- {name.upper()} ---\n")
+        # print(content)
 
 
 if __name__ == "__main__":
-    test_pdf_extraction()
+    check_pdf_extraction()

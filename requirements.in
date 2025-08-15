@@ -1,6 +1,9 @@
+dotenv
 fastapi
 uvicorn
 langchain
+langchain_huggingface
+langchain_openai
 pydantic
 pdfplumber
 PyMuPDF
