@@ -6,6 +6,7 @@ import os
 from fastapi import FastAPI, UploadFile, File
 from app.llm.setup import LLMSetup
 from app.orchestrator import process_paper
+from app.tool_registry import get_tools
 from app.utils.logger import get_logger
 
 os.environ["OPENAI_API_KEY"] = dotenv_values().get("OPENAI_API_KEY")
@@ -21,6 +22,8 @@ llms = {
     # Max creativity (e.g., for analogies or hypotheses)
     "creative": LLMSetup("explorer_llm", temperature=0.9).get_llm().get_llm(),
 }
+
+tools = get_tools()
 
 
 @app.post("/summarize/")

@@ -1,17 +1,25 @@
-dotenv
+--index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://pypi.org/simple
+
+torch==2.8.0+cu128
+torchaudio==2.8.0+cu128
+torchvision==0.23.0+cu128
+
+docling
 fastapi
-uvicorn
 langchain
 langchain_huggingface
 langchain_openai
-pydantic
-pdfplumber
-PyMuPDF
-openai
-python-multipart
-tiktoken
 numpy
+openai
+pdfplumber
+pydantic
+PyMuPDF
+python-dotenv
+python-multipart
 scipy
+tiktoken
+uvicorn
 
 # development & testing tools
 pytest
