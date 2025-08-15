@@ -1,16 +1,23 @@
-# This is a sample Python script.
+import os
+from app.tool_registry import get_tools
+from app.belief_system import update_beliefs
+from app.tools.local.pdf_extractor import extract_text_from_pdf
 
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
+async def process_paper(file):
+    content = await file.read()
+    file_path = f"data/{file.filename}"
+    with open(file_path, "wb") as f:
+        f.write(content)
 
+    # Step 1: Extract text
+    pdf_text = extract_text_from_pdf(file_path)
 
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
+    # Step 2: Run belief update (stub)
+    belief_vector = update_beliefs(pdf_text)
 
+    # Step 3: Use summarization tool
+    tools = get_tools()
+    summary_tool = tools["summarizer"]
+    summary = summary_tool.run(pdf_text, belief_vector)
 
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
-    print_hi('PyCharm')
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+    return summary
