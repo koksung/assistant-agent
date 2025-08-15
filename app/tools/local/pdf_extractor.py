@@ -1,8 +1,9 @@
-import pdfplumber
+import fitz  # PyMuPDF
 
-def extract_text_from_pdf(path: str) -> str:
+def extract_pdf_text(path: str) -> str:
+    doc = fitz.open(path)
     text = ""
-    with pdfplumber.open(path) as pdf:
-        for page in pdf.pages:
-            text += page.extract_text() or ""
-    return text
+    for page in doc:
+        # noinspection PyUnresolvedReferences
+        text += page.get_text() + "\n"
+    return text.strip()

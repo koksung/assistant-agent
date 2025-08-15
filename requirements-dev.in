@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+langchain
+pydantic
+pdfplumber
+PyMuPDF
+openai
+python-multipart
+tiktoken
+numpy
+scipy
+
+# development & testing tools
+pytest

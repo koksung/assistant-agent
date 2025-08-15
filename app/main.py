@@ -9,6 +9,4 @@ async def summarize(file: UploadFile = File(...)):
     return {"summary": result}
 
 
-if __name__ == "__main__":
-    import sys
-    sys.path.append("..")  # or absolute path to root
+# uvicorn app.main:app --reload
