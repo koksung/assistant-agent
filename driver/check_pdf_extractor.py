@@ -1,5 +1,5 @@
 from app.tools.local.pdf_extractor import extract_pdf_text
-from app.tools.local.docling_pdf_extractor.docling_pdf_extractor import DoclingExtractorTool
+from app.tools.remote.docling_pdf_extractor import DoclingExtractorTool
 
 
 def check_local_pdf_extraction(pdf_path):
