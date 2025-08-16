@@ -1,5 +1,5 @@
 from app.tools.local.pdf_extractor import extract_pdf_text
-from app.tools.remote.docling_pdf_extractor import DoclingExtractorTool
+from app.tools.remote.docling_pdf_extractor.tool import call_docling_pdf_extractor_remote
 
 
 def check_local_pdf_extraction(pdf_path):
@@ -12,13 +12,13 @@ def check_local_pdf_extraction(pdf_path):
 
 
 def check_mcp_pdf_extraction(pdf_path):
-    output = DoclingExtractorTool.run(pdf_path)
-    print(output[:1000])
+    output = call_docling_pdf_extractor_remote(pdf_path)
+    print(output[:50000])
 
 
 if __name__ == "__main__":
     check_local = False
-    file_path = "../data/ddpm.pdf"
+    file_path = "C:/Users/Zeus/PycharmProjects/assistant-agent/data/ddpm-short.pdf"
     if check_local:
         check_local_pdf_extraction(file_path)
     else:

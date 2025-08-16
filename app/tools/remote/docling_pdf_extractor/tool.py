@@ -11,7 +11,7 @@ def call_docling_pdf_extractor_remote(pdf_path: str) -> str:
     response = requests.post(
         "http://127.0.0.1:8110/extract",  # Replace with actual server address if deployed
         params={"file_path": pdf_path},   # FastAPI expects file_path as query param
-        timeout=30  # Adjust as needed
+        timeout=1200  # Adjust as needed
     )
     if response.status_code != 200:
         raise RuntimeError(f"Docling extractor failed: {response.status_code} - {response.text}")
