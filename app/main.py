@@ -1,14 +1,16 @@
 from dotenv import dotenv_values, load_dotenv
 load_dotenv()
 
+import io
 import os
+import asyncio
 
-from fastapi import FastAPI, UploadFile, File, Body
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
 from app.llm.setup import LLMSetup
-from app.orchestrator import prepare_user_task
+from app.orchestrator import conversation_loop, prepare_user_task
 from app.tool_registry import initialize_tool_registry, set_global_registry
 from app.users.session import UserSessionManager
 from app.users.api_models import InteractionRequest
@@ -21,7 +23,7 @@ logger = get_logger(__name__)
 llms = {
     "summarizer": LLMSetup("summarizer_llm", temperature=0.3).get_llm(),
     "orchestrator": LLMSetup("orchestrator_llm", temperature=0.7).get_llm(),
-    "creative": LLMSetup("explorer_llm", temperature=0.9).get_llm()
+    "belief_updater": LLMSetup("belief_updater_llm ", temperature=0.4).get_llm()
 }
 
 # Global registry + session manager
@@ -45,17 +47,16 @@ async def interact(request: InteractionRequest):
     logger.info(f"New interaction from user: {request.user_id} | file: {request.file_path}")
     session = session_manager.get_or_create_session(request.user_id)
 
-    # Open the file manually (simulating UploadFile)
-    with open(request.file_path, "rb") as f:
-        from fastapi import UploadFile
-        file = UploadFile(filename=request.file_path, file=f)
-
-        result = await prepare_user_task(
-            file=file,
-            user_query=request.user_query,
-            session=session,
-            llms=llms
-        )
+    # In round 1, req.file_path may be used to load the PDF
+    if request.file_path:
+        with open(request.file_path, "rb") as f:
+            file_bytes = await asyncio.to_thread(f.read)
+        file = UploadFile(filename=request.file_path.split("/")[-1], file=io.BytesIO(file_bytes))
+        result = await prepare_user_task(file, user_query=request.user_query, session=session, llms=llms)
+    else:
+        if not session.task:
+            raise HTTPException(status_code=400, detail="No active document for this session.")
+        result = await conversation_loop(request.user_query, session.task, session, llms)
 
     session_manager.update_session(session)
     return JSONResponse(content={"response": result})

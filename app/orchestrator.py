@@ -47,26 +47,62 @@ def build_tool_input(step: Dict, task: UserTask, session: ConversationContext) -
 
 
 def build_summary_prompt(
-    task: UserTask,
-    intermediate_outputs: List[Dict],
-    belief_state: Dict,
-    user_input: str
-) -> str:
+        task: UserTask,
+        intermediate_outputs: List[Dict],
+        belief_state: Dict,
+        user_input: str
+    ) -> str:
+    # Extract belief components
+    belief = belief_state.get("belief", {})
+    archetypes = belief.get("archetype_probs", {})
+    preferences = belief.get("preferences", {})
+
+    # Format archetypes and preferences
+    formatted_archetypes = "\n".join(
+        f"- {k.replace('_', ' ').title()}: {v:.2f}" for k, v in archetypes.items()
+    ) or "Unknown"
+
+    formatted_preferences = "\n".join(
+        f"- {k.replace('_', ' ').title()}: {v}" for k, v in preferences.items()
+    ) or "Not specified"
+
+    # Assemble intermediate tool outputs
     intermediate_summary = ""
     for item in intermediate_outputs:
-        tool_name = item.get("tool")
-        output = item.get("output")
-        intermediate_summary += f"\n[{tool_name} Output]:\n{output}\n"
+        tool_name = item.get("tool", "unknown_tool")
+        output = item.get("output", "").strip()
+        intermediate_summary += f"\n### Output from `{tool_name}`\n{output}\n"
 
-    return f"""You are an academic research assistant helping summarize scientific papers.
-    The user said: "{user_input}"
-    Your understanding of the user archetype so far: {belief_state}
+    # Final prompt to summarizer LLM
+    return f"""
+    You are an academic research assistant helping summarize scientific papers.
     
-    Here are intermediate tool outputs you can use:
+    ## User Query
+    "{user_input}"
+    
+    ## User Belief Profile
+    
+    ### Archetype Probabilities
+    {formatted_archetypes}
+    
+    ### User Preferences
+    {formatted_preferences}
+    
+    ## Contextual Instructions
+    
+    - Align your summary to the user's intent and preferences.
+    - Adjust tone, length, and depth based on belief profile.
+    - Emphasize methods, results, math, or novelty **as appropriate**.
+    
+    ## Tool Outputs for Reference
     {intermediate_summary}
     
-    Now, summarize the paper accordingly. Be precise and match the user's preferences.
-    Output should be structured in clean markdown with clear section headings.
+    ## Your Task
+    
+    Write a clean, markdown-formatted summary of the paper. Include:
+    - Appropriate section headers (e.g., ## Abstract, ## Methodology)
+    - Highlights aligned with the user’s archetype
+    - Clear structure, precise explanations, and user-adaptive tone
     """.strip()
 
 
@@ -87,14 +123,15 @@ async def prepare_user_task(file, user_query: str, session: ConversationContext,
         metadata={"filename": file.filename}
     )
 
-    # Add user message
+    session.set_task(task)  # Now stored for later rounds
     session.add_message("user", user_query)
 
-    # Step 3: Initial belief update (only if not already present)
+    # Initial belief update (only if not already present)
     if not session.belief_state:
-        session.update_beliefs(update_beliefs(pdf_text))
+        insight = update_beliefs(user_query)
+        session.update_beliefs(insight)
 
-    # Step 4-7: Conversational reasoning loop
+    # Conversational reasoning loop
     response = await conversation_loop(user_query, task, session, llms)
     return response
 
@@ -105,17 +142,44 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
     summarizer_llm = llms["summarizer"]
 
     preview = task.get_full_text()[:1000]
+    archetypes = session.belief_state.get("belief", {}).get("archetype_probs", {})
+    preferences = session.belief_state.get("belief", {}).get("preferences", {})
+    formatted_archetypes = "\n".join(
+        f"- {k}: {v:.2f}" for k, v in archetypes.items()
+    ) or "Unknown"
+    formatted_prefs = "\n".join(
+        f"- {k}: {v}" for k, v in preferences.items()
+    ) or "No explicit preferences"
 
     # Step 4: Plan via CoT
-    cot_prompt = f"""You are an LLM researcher assistant.
-    User wants: "{user_input}"
-    Current paper content has: {preview}...
-    
-    User archetype: {session.belief_state}
-    
-    What tools should be used to fulfill the user's intent?
-    Think step-by-step. Return a structured plan.
-    Available tools: {list(tools.keys())}
+    cot_prompt = f"""
+    You are a highly capable orchestration agent that can choose the right tools to help a user understand or summarize a scientific paper.
+
+    ## User Input:
+    "{user_input}"
+
+    ## Paper Preview:
+    {preview}
+
+    ## User Belief Profile:
+
+    ### Archetype Probabilities:
+    {formatted_archetypes}
+
+    ### Known Preferences:
+    {formatted_prefs}
+
+    ## Instructions:
+    Based on the user’s goal and belief profile above:
+    - Think step-by-step.
+    - Determine which tools to use (in order).
+    - Prioritize tools that match the user's archetype and preferences.
+    - Be adaptive: if the user is math-oriented, prioritize equation tools; if they are a summary-seeker, go straight to summarization.
+
+    ## Available Tools:
+    {list(tools.keys())}
+
+    Output your step-by-step reasoning as a structured plan.
     """.strip()
     plan = orchestrator_llm.invoke(cot_prompt)
 
@@ -138,7 +202,8 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
     response = summarizer_llm.invoke(summary_prompt)
 
     # Step 7: Update beliefs
-    session.update_beliefs(update_beliefs(response))
+    full_context = "\n".join([f"{m['role']}: {m['content']}" for m in session.conversation_history])
+    session.update_beliefs(update_beliefs(full_context))
     session.add_message("summarizer", response)
 
     return response
