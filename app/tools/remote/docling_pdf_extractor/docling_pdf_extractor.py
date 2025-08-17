@@ -1,7 +1,9 @@
 import re
+import os
 import html
+import tempfile
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI,  UploadFile, File, HTTPException
 from fastapi.responses import PlainTextResponse
 from contextlib import asynccontextmanager
 
@@ -104,17 +106,29 @@ async def health():
 
 
 @app.post("/extract", response_class=PlainTextResponse)
-async def extract_pdf_with_docling(file_path: str):
-    # Access the converter from app state
-    converter: DocumentConverter = app.state.converter
+async def extract_pdf_with_docling(file: UploadFile = File(...)):
     try:
-        result = converter.convert(file_path)
+        contents = await file.read()
+        # Create a temp file with a .pdf suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp:
+            temp.write(contents)
+            temp_path = temp.name  # Absolute path to the file
+        with open(temp_path, "wb") as f:
+            f.write(contents)
+
+        converter: DocumentConverter = app.state.converter
+        result = converter.convert(temp_path)
+
         markdown = result.document.export_to_markdown()
         markdown = clean_docling_markdown(markdown)
         return final_clean(markdown)
     except Exception as e:
         logger.exception(f"Extraction failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
 
 # run it
 # uvicorn app.tools.remote.docling_pdf_extractor.docling_pdf_extractor:app --host 127.0.0.1 --port 8110

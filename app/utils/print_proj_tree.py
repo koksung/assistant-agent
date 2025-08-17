@@ -22,4 +22,4 @@ def print_tree(startpath='.', prefix=''):
             print_tree(path, prefix + extension)
 
 if __name__ == '__main__':
-    print_tree('../.')  # Always start from current directory
+    print_tree('../../.')  # Always start from current directory

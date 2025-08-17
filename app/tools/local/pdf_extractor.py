@@ -1,6 +1,7 @@
 import fitz  # PyMuPDF
 import re
 from typing import Dict
+from pydantic import BaseModel, Field
 
 
 def split_into_sections(text: str) -> Dict[str, str]:
@@ -59,3 +60,7 @@ def extract_pdf_text(path: str) -> Dict[str, str]:
         # noinspection PyUnresolvedReferences
         text += page.get_text() + "\n"
     return split_into_sections(text.strip())
+
+
+class LocalPdfExtractorInput(BaseModel):
+    pdf_path: str = Field(..., description="Absolute or relative path to the PDF file")
