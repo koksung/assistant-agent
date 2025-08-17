@@ -12,8 +12,12 @@ def check_local_pdf_extraction(pdf_path):
 
 
 def check_mcp_pdf_extraction(pdf_path):
-    output = call_docling_pdf_extractor_remote(pdf_path)
-    print(output[:50000])
+    output_dict = call_docling_pdf_extractor_remote(pdf_path)
+    output = "\n\n".join(
+                f"# {section_name.replace('_', ' ').title()}\n{section_text.strip()}"
+                for section_name, section_text in output_dict.items()
+            )
+    print(output)
 
 
 if __name__ == "__main__":
