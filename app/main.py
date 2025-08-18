@@ -16,24 +16,29 @@ from app.users.session import UserSessionManager
 from app.users.api_models import InteractionRequest
 from app.utils.logger import get_logger
 
-os.environ["OPENAI_API_KEY"] = dotenv_values().get("OPENAI_API_KEY")
+# Optional: only set if present in .env
+api_key = dotenv_values().get("OPENAI_API_KEY")
+if api_key:
+    os.environ["OPENAI_API_KEY"] = api_key
+
 logger = get_logger(__name__)
 
-# Initialize LLMs
+# Initialize LLMs (✅ removed trailing space)
 llms = {
-    "summarizer": LLMSetup("summarizer_llm", temperature=0.3).get_llm(),
+    "summarizer":   LLMSetup("summarizer_llm",   temperature=0.3).get_llm(),
     "orchestrator": LLMSetup("orchestrator_llm", temperature=0.7).get_llm(),
-    "belief_updater": LLMSetup("belief_updater_llm ", temperature=0.4).get_llm()
+    "belief_updater": LLMSetup("belief_updater_llm", temperature=0.4).get_llm(),
 }
 
 # Global registry + session manager
 session_manager = UserSessionManager()
 
+
 @asynccontextmanager
-async def lifespan(fapp: FastAPI):
+async def lifespan(_: FastAPI):
     registry = initialize_tool_registry()
     set_global_registry(registry)
-    logger.info("Available tools:\n")
+    logger.info("Available tools:")
     for name, tool in registry.list_all_tools().items():
         logger.info(tool.describe())
     yield
@@ -47,10 +52,13 @@ async def interact(request: InteractionRequest):
     logger.info(f"New interaction from user: {request.user_id} | file: {request.file_path}")
     session = session_manager.get_or_create_session(request.user_id)
 
-    # In round 1, req.file_path may be used to load the PDF
+    # Round 1: user provides a file_path (server-side path). Load and wrap as UploadFile.
     if request.file_path:
-        with open(request.file_path, "rb") as f:
-            file_bytes = await asyncio.to_thread(f.read)
+        try:
+            with open(request.file_path, "rb") as f:
+                file_bytes = await asyncio.to_thread(f.read)
+        except FileNotFoundError:
+            raise HTTPException(status_code=400, detail="file_path not found on server.")
         file = UploadFile(filename=request.file_path.split("/")[-1], file=io.BytesIO(file_bytes))
         result = await prepare_user_task(file, user_query=request.user_query, session=session, llms=llms)
     else:

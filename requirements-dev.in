@@ -10,6 +10,9 @@ fastapi
 langchain
 langchain_huggingface
 langchain_openai
+matplotlib
+nougat-ocr
+nougat-ocr[api]
 numpy
 openai
 pdfplumber

@@ -1,6 +1,6 @@
 import os
 
-IGNORE_DIRS = {'__pycache__', '.venv', '.git', '.idea', '.mypy_cache'}
+IGNORE_DIRS = {'__pycache__', '.venv', '.git', '.idea', '.mypy_cache', 'pdfs'}
 IGNORE_FILES = set()
 HIDDEN_PREFIX = '.'  # skip all hidden files/folders
 

@@ -44,7 +44,8 @@ def normalize_section_name(raw: str) -> str:
     name = raw.lower()
     if "abstract" in name: return "abstract"
     if "introduction" in name: return "introduction"
-    if "related" in name or "background" in name: return "related_work"
+    if "related" in name: return "related_work"
+    if "background" in name: return "background"
     if "method" in name or "approach" in name or "model" in name: return "method"
     if "experiment" in name or "evaluation" in name or "result" in name: return "experiments"
     if "discussion" in name or "analysis" in name: return "discussion"

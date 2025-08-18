@@ -1,53 +1,159 @@
 from langchain.tools import StructuredTool
-from typing import Optional
-
-from torch import initial_seed
-
-from app.tools.remote.docling_pdf_extractor.tool import call_docling_pdf_extractor_remote, DoclingExtractorInput
-from app.tools.local.pdf_extractor import extract_pdf_text, LocalPdfExtractorInput
+from enum import Enum
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
 
 
+# --- Enums / hints -----------------------------------------------------------
+class CostHint(Enum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+
+class LatencyClass(Enum):
+    LOW = 100       # ~< 200ms
+    MID = 800       # ~0.2–1s
+    HIGH = 1500     # >1s
+
+
+@dataclass
 class ToolProfile:
-    def __init__(
-        self,
-        tool: StructuredTool,
-        purpose: str,
-        strengths: str,
-        limitations: str,
-        cost: Optional[str] = None,
-        latency: Optional[str] = None,
-    ):
-        self.tool = tool  # This is a LangChain StructuredTool
-        self.purpose = purpose
-        self.strengths = strengths
-        self.limitations = limitations
-        self.cost = cost
-        self.latency = latency
+    """
+    Wraps a LangChain StructuredTool with routing-friendly metadata.
+    """
+    tool: StructuredTool
+    purpose: str
+    strengths: str
+    limitations: str
+    # routing fields
+    capabilities: List[str] = field(default_factory=list)  # e.g. ["pdf.extract","equations"]
+    requires_network: bool = False
+    cost_hint: CostHint = CostHint.LOW
+    latency_hint_ms: int = LatencyClass.LOW.value
+    # Human-facing (optional) mirrors for UI/logs
+    cost_label: Optional[str] = None
+    latency_label: Optional[str] = None
 
-    def describe(self) -> str:
+    def _inputs_dict(self) -> Dict[str, str]:
+        """
+        Robustly extract arg annotations across Pydantic/LC versions.
+        """
+        schema = getattr(self.tool, "args_schema", None)
+        ann = getattr(schema, "__annotations__", None)
+        if isinstance(ann, dict):
+            return {k: getattr(v, "__name__", str(v)) for k, v in ann.items()}
+        # Fallback: try pydantic model_fields (v2) or __fields__ (v1)
+        fields = getattr(schema, "model_fields", None) or getattr(schema, "__fields__", None)
+        if isinstance(fields, dict):
+            return {k: str(v.annotation) for k, v in fields.items()}
+        return {}
+
+    def to_string(self) -> str:
         return (
-            f"{self.tool.name}: {self.purpose} | Inputs: {self.tool.args_schema.__annotations__} "
-            f"| Outputs: [see tool description] | Strengths: {self.strengths} | Limitations: {self.limitations}"
+            f"{self.tool.name}: {self.purpose} | "
+            f"Inputs: {self._inputs_dict()} | Outputs: [see tool description] | "
+            f"Strengths: {self.strengths} | Limitations: {self.limitations}"
         )
+
+    def describe(self) -> dict:
+        return {
+            "name": self.tool.name,
+            "purpose": self.purpose,
+            "inputs": self._inputs_dict(),
+            "outputs": "Structured markdown and/or LaTeX",
+            "strengths": self.strengths,
+            "limitations": self.limitations,
+            "capabilities": self.capabilities,
+            "requires_network": self.requires_network,
+            "cost_hint": self.cost_hint.name,
+            "latency_hint_ms": self.latency_hint_ms,
+            "cost_label": self.cost_label,
+            "latency_label": self.latency_label,
+        }
+
+
+@dataclass
+class ToolCallContext:
+    user_id: str
+    archetypes: List[str] = field(default_factory=list)  # e.g. ["privacy_sensitive","math_heavy","visual_learner"]
+    preferences: Dict[str, Any] = field(default_factory=dict)  # e.g. {"prefer_local": True}
+    allow_remote: bool = True
+    privacy_level: str = "standard"  # or "strict"
+    max_latency_ms: Optional[int] = None
+    budget_level: Optional[CostHint] = None  # constrain to <= level
 
 
 class ToolRegistry:
     def __init__(self):
-        self.tools = {}
+        self.tools: Dict[str, ToolProfile] = {}
 
-    def register_tool(self, rich_tool: ToolProfile):
-        self.tools[rich_tool.tool.name] = rich_tool
+    # --- registration / retrieval -------------------------------------------
+    def register_tool(self, rich_tool: ToolProfile, *, override: bool = False):
+        name = rich_tool.tool.name
+        if not override and name in self.tools:
+            raise ValueError(f"Tool '{name}' already registered")
+        self.tools[name] = rich_tool
 
     def get_tool(self, name: str) -> Optional[ToolProfile]:
         return self.tools.get(name)
 
-    def list_all_tools(self) -> dict:
-        return self.tools
+    def list_all_tools(self) -> Dict[str, ToolProfile]:
+        return dict(self.tools)
+
+    def by_capability(self, capability: str) -> List[ToolProfile]:
+        return [t for t in self.tools.values() if capability in t.capabilities]
+
+    # --- routing -------------------------------------------------------------
+    def resolve(self, capability: str, ctx: ToolCallContext) -> Optional[ToolProfile]:
+        candidates = self.by_capability(capability)
+        if not candidates:
+            return None
+
+        def score(t: ToolProfile) -> float:
+            s = 0.0
+            # privacy / remote allowance
+            if t.requires_network and (not ctx.allow_remote or ctx.privacy_level == "strict"):
+                s -= 100.0
+            # hard budget cap
+            if ctx.budget_level is not None and t.cost_hint.value > ctx.budget_level.value:
+                s -= 50.0
+            # latency budget
+            if ctx.max_latency_ms is not None:
+                over = max(0, t.latency_hint_ms - ctx.max_latency_ms)
+                s -= over / 100.0
+
+            # archetype-guided nudges
+            if "privacy_sensitive" in ctx.archetypes and not t.requires_network:
+                s += 5.0
+            if "math_heavy" in ctx.archetypes and "equations" in t.capabilities:
+                s += 3.0
+            if "visual_learner" in ctx.archetypes and "layout" in t.capabilities:
+                s += 2.0
+
+            # user preferences
+            if ctx.preferences.get("prefer_local") and not t.requires_network:
+                s += 2.0
+
+            # general tie-breakers: cheaper & faster first
+            s -= t.cost_hint.value * 0.5
+            s -= t.latency_hint_ms / 2000.0  # normalize
+            return s
+
+        return sorted(candidates, key=score, reverse=True)[0]
+
+# --- Initialization of actual tools -------------------------------------
+
+# Imports kept here to avoid circulars in some runners
+from app.tools.remote.nougat_pdf_extractor import nougat_pdf_extraction, NougatPdfExtractorInput
+from app.tools.remote.docling_pdf_extractor.tool import call_docling_pdf_extractor_remote, DoclingExtractorInput
+from app.tools.local.pdf_extractor import extract_pdf_text, LocalPdfExtractorInput
+from app.tools.local.equation_renderer import EquationRendererInput, render_equation
 
 
 def initialize_tool_registry() -> ToolRegistry:
-    initial_registry = ToolRegistry()
+    r = ToolRegistry()
 
+    # Local PyMuPDF extractor
     local_pdf_extractor = StructuredTool.from_function(
         func=extract_pdf_text,
         name="local_pdf_extractor",
@@ -55,44 +161,93 @@ def initialize_tool_registry() -> ToolRegistry:
         args_schema=LocalPdfExtractorInput,
         return_direct=True
     )
-    initial_registry.register_tool(ToolProfile(
+    r.register_tool(ToolProfile(
         tool=local_pdf_extractor,
-        purpose="Extract structured academic content from PDFs with simple layouts.",
-        strengths="Extracts PDF text paragraph fairly fast.",
-        limitations="Might miss out certain sections, blocks of text.",
-        cost="Low",
-        latency="Low"
+        purpose="Extract structured academic content from simpler PDFs.",
+        strengths="Fast, local, good paragraph extraction.",
+        limitations="May miss some sections/blocks; limited equation fidelity.",
+        capabilities=["pdf.extract"],
+        requires_network=False,
+        cost_hint=CostHint.LOW,
+        latency_hint_ms=LatencyClass.LOW.value,
+        cost_label="Low",
+        latency_label="Low",
     ))
 
+    # Remote Nougat extractor (equations focus)
+    remote_nougat_tool = StructuredTool.from_function(
+        func=nougat_pdf_extraction,
+        name="advanced_pdf_extractor_1",
+        description="Extract structured markdown and LaTeX equations from academic PDFs using Nougat.",
+        args_schema=NougatPdfExtractorInput,
+        return_direct=True
+    )
+    r.register_tool(ToolProfile(
+        tool=remote_nougat_tool,
+        purpose="Handle complex layouts with equations.",
+        strengths="Better section structure and LaTeX equations.",
+        limitations="Requires internet and external API availability.",
+        capabilities=["pdf.extract", "equations"],
+        requires_network=True,
+        cost_hint=CostHint.LOW,
+        latency_hint_ms=LatencyClass.MID.value,
+        cost_label="Low",
+        latency_label="Mid",
+    ))
+
+    # Remote Docling extractor (layout/structure focus)
     remote_docling_tool = StructuredTool.from_function(
         func=call_docling_pdf_extractor_remote,
-        name="advanced_pdf_extractor",
+        name="advanced_pdf_extractor_2",
         description="Extract structured markdown text from academic PDFs using Docling.",
         args_schema=DoclingExtractorInput,
         return_direct=True
     )
-    initial_registry.register_tool(ToolProfile(
+    r.register_tool(ToolProfile(
         tool=remote_docling_tool,
-        purpose="Extract structured academic content from PDFs with complex layouts.",
-        strengths="Handles much better pdf text extraction for sections.",
+        purpose="Robust extraction on complex layouts and sections.",
+        strengths="Good sectioning and structural text extraction.",
         limitations="Requires internet and external API availability.",
-        cost="Moderate (external API)",
-        latency="High"
+        capabilities=["pdf.extract", "layout"],
+        requires_network=True,
+        cost_hint=CostHint.MEDIUM,
+        latency_hint_ms=LatencyClass.HIGH.value,
+        cost_label="Moderate",
+        latency_label="High",
     ))
 
-    return initial_registry
+    # Equation Renderer (local → images)
+    equation_renderer_tool = StructuredTool.from_function(
+        func=render_equation,
+        name="equation_renderer",
+        description="Render LaTeX equations (from markdown or via Nougat) into PNG images. Returns list of file paths.",
+        args_schema=EquationRendererInput,
+        return_direct=True
+    )
+    r.register_tool(ToolProfile(
+        tool=equation_renderer_tool,
+        purpose="Convert LaTeX math into rendered images for math- or visual-oriented users.",
+        strengths="High-fidelity LaTeX rendering (requires local TeX); flexible input (markdown or PDF).",
+        limitations="Requires a LaTeX installation for usetex; invalid LaTeX may fail to render.",
+        capabilities=["equations", "visualization"],
+        requires_network=False,  # local rendering
+        cost_hint=CostHint.LOW,
+        latency_hint_ms=LatencyClass.LOW.value,
+        cost_label="Low",
+        latency_label="Low",
+    ))
 
-# This will hold the global ToolRegistry instance
+    return r
+
+
 registry: Optional[ToolRegistry] = None
 
-def set_global_registry(reg):
+def set_global_registry(reg: ToolRegistry):
     global registry
     registry = reg
-
 
 def get_registry() -> Optional[ToolRegistry]:
     return registry
 
-
-def get_tools():
+def get_tools() -> Dict[str, ToolProfile]:
     return registry.list_all_tools() if registry else {}
