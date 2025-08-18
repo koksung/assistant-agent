@@ -240,7 +240,7 @@ def _coerce_payload_for_tool(tool, payload: dict, task: UserTask) -> dict:
 
 def _format_capability_menu(tools: Dict[str, Any]) -> str:
     capability_hints = [
-        "- pdf.summarize: Summarize a paper quickly using the abstract (with fallback).",
+        "- abstract.summarize: Summarize a paper quickly using the abstract (with fallback).",
         "- pdf.extract: Extracts structured text/sections from PDFs",
         "- equations: Extracts/retains LaTeX and equations where applicable",
         "- layout: Emphasizes structural fidelity in complex layouts",

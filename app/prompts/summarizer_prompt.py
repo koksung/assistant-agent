@@ -8,8 +8,8 @@ Summarize technical text faithfully and concisely.
 """
 
 # For chunk-level (map) summaries
-CHUNK_USER_TEMPLATE = """You will receive a chunk of a larger document.
-Write a concise summary of ONLY this chunk.
+CHUNK_USER_TEMPLATE = """You will receive some gathered context of a conversation and bits of a larger document.
+Write a concise summary of ONLY these context as info.
 
 Requirements:
 - 3–6 bullet points

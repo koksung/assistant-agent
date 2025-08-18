@@ -148,6 +148,7 @@ from app.tools.remote.nougat_pdf_extractor import nougat_pdf_extraction, NougatP
 from app.tools.remote.docling_pdf_extractor.tool import call_docling_pdf_extractor_remote, DoclingExtractorInput
 from app.tools.local.pdf_extractor import extract_pdf_text, LocalPdfExtractorInput
 from app.tools.local.equation_renderer import EquationRendererInput, render_equation
+from app.tools.local.summarizer_tool import GenerateSummaryInput, generate_summary
 from app.tools.local.abstract_extractor import abstract_summary as _abstract_summary_fn, AbstractSummaryInput
 
 def _extract_pdf_text_adapter(pdf_path: str, **kwargs):
@@ -331,6 +332,27 @@ def initialize_tool_registry() -> ToolRegistry:
         latency_hint_ms=LatencyClass.MID.value,  # typically ~0.2–1s
         latency_label="Mid",
         cost_label="Low",
+    ))
+
+    # Generate summary
+    generate_summary_tool = StructuredTool.from_function(
+        func=generate_summary,
+        name="generate_summary",
+        description=" Produce an adaptive summary from gathered context.",
+        args_schema=GenerateSummaryInput,
+        return_direct=True
+    )
+    r.register_tool(ToolProfile(
+        tool=generate_summary_tool,
+        purpose="Provides a good high-level summary of the current state of things via the context.",
+        strengths="Provides a good high-level summary of the current state of things via the context.",
+        limitations="If context is off, summary might be off too.",
+        capabilities=["summary.generate"],  # <- new capability tag
+        requires_network=True,  # set True if your summarizer LLM is remote; set False if local
+        cost_hint=CostHint.MEDIUM,  # LLM call cost
+        latency_hint_ms=LatencyClass.MID.value,  # typically ~0.2–1s
+        latency_label="Mid",
+        cost_label="Mid",
     ))
 
     return r
