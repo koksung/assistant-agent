@@ -65,11 +65,13 @@ def _print_plan(plan: Optional[str]) -> None:
 async def main():
     parser = argparse.ArgumentParser(description="Two-round smoke test for agentic LLM orchestrator.")
     parser.add_argument("--pdf", default="data/ddpm-short.pdf", help="Path to the PDF (round 1).")
-    parser.add_argument("--q1", default="Summarize methodology and key equations.",
+    parser.add_argument("--q1", default="Give me an initial high-level summary of this paper.",
                         help="Round 1 user query.")
-    parser.add_argument("--q2", default="Now focus on the math details and derivations. "
-                                        "I prefer concise math-first summaries focusing on derivations; I’m familiar with diffusion models.",
+    parser.add_argument("--q2", default="Summarize methodology and key equations.",
                         help="Round 2 user query (follow-up).")
+    parser.add_argument("--q3", default="Now focus on the math details and derivations. "
+                                        "I prefer concise math-first summaries focusing on derivations; I’m familiar with diffusion models.",
+                        help="Round 3 user query (follow-up).")
     args = parser.parse_args()
 
     if not os.path.exists(args.pdf):
@@ -123,6 +125,21 @@ async def main():
     s2 = str(result2)
     print(s2[:800] + ("..." if len(s2) > 800 else ""))
 
+    # ---- 4) Round 3: follow-up q3 (no file) --------------------------------
+    print("\n=== ROUND 3 ===")
+    result3 = await conversation_loop(args.q3, session.task, session, llms)
+
+    print("\n--- Beliefs AFTER Round 3 ---")
+    print(_pretty_beliefs(session.belief_state))
+
+    plan3 = _last_plan_from_session(session)
+    print("\n--- Orchestrator Plan Round 3 ---")
+    _print_plan(plan3)
+
+    print("\n--- Summarizer Output Round 3 (truncated) ---")
+    s3 = str(result3)
+    print(s3[:800] + ("..." if len(s3) > 800 else ""))
+
     # Optional: dump full session to a JSON file for inspection
     safe_history = [{**m, "content": str(m.get("content", ""))} for m in session.conversation_history]
     dump = {
@@ -130,8 +147,10 @@ async def main():
         "conversation_history": safe_history,
         "round1_plan": plan1,
         "round2_plan": plan2,
+        "round3_plan": plan3,
         "round1_output": s1,
         "round2_output": s2,
+        "round3_output": s3
     }
     os.makedirs("logs", exist_ok=True)
     with open("logs/smoke_two_rounds.json", "w", encoding="utf-8") as f:

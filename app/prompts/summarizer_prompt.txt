@@ -1,8 +1,0 @@
-You are an expert AI assistant helping a researcher understand a section of an academic paper.
-
-Section title: {{ section_name }}
-
-Text:
-{{ section_text }}
-
-Summarize this section in 3–5 sentences. Be clear and concise. Highlight any novel concepts, datasets, methods, or results.

@@ -148,7 +148,7 @@ from app.tools.remote.nougat_pdf_extractor import nougat_pdf_extraction, NougatP
 from app.tools.remote.docling_pdf_extractor.tool import call_docling_pdf_extractor_remote, DoclingExtractorInput
 from app.tools.local.pdf_extractor import extract_pdf_text, LocalPdfExtractorInput
 from app.tools.local.equation_renderer import EquationRendererInput, render_equation
-
+from app.tools.local.abstract_extractor import abstract_summary as _abstract_summary_fn, AbstractSummaryInput
 
 def _extract_pdf_text_adapter(pdf_path: str, **kwargs):
     # Call the original function positionally so its param name doesn’t matter
@@ -216,6 +216,16 @@ def _docling_adapter(**kwargs) -> Any:
     except TypeError:
         # fallback 2: function accepts kwargs
         return call_docling_pdf_extractor_remote(**model.model_dump())
+
+
+def _abstract_summary_adapter(pdf_path: str) -> str:
+    """
+    Extracts the abstract (or falls back to introduction) and returns a concise summary.
+    Uses the project's configured summarizer LLM.
+    """
+    from app.main import llms
+    summarizer_llm = llms["summarizer"]   # your existing map of LLMs
+    return _abstract_summary_fn(pdf_path, summarizer_llm)
 
 
 def initialize_tool_registry() -> ToolRegistry:
@@ -299,6 +309,28 @@ def initialize_tool_registry() -> ToolRegistry:
         cost_hint=CostHint.LOW,
         latency_hint_ms=LatencyClass.LOW.value,
         latency_label="Low",
+    ))
+
+    # Abstract-first summary (local extract + LLM summarize)
+    abstract_summary_tool = StructuredTool.from_function(
+        func=_abstract_summary_adapter,
+        name="abstract_summary",
+        description="Summarize a paper using its Abstract (fallback to Introduction if no Abstract found). "
+                    "Returns a concise bullet/paragraph summary. Excellent for providing an initial summary.",
+        args_schema=AbstractSummaryInput,
+        return_direct=True
+    )
+    r.register_tool(ToolProfile(
+        tool=abstract_summary_tool,
+        purpose="Give users a fast, low-latency entry point: extract Abstract → summarize.",
+        strengths="Very quick perceived results; robust fallback to Introduction; good for first-touch overview.",
+        limitations="If the paper's abstract is unusually sparse or promotional, the summary may miss deeper method/results details.",
+        capabilities=["abstract.summarize"],  # <- new capability tag
+        requires_network=True,  # set True if your summarizer LLM is remote; set False if local
+        cost_hint=CostHint.LOW,  # LLM call cost
+        latency_hint_ms=LatencyClass.MID.value,  # typically ~0.2–1s
+        latency_label="Mid",
+        cost_label="Low",
     ))
 
     return r

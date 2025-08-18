@@ -23,11 +23,11 @@ if api_key:
 
 logger = get_logger(__name__)
 
-# Initialize LLMs (✅ removed trailing space)
+# Initialize LLMs
 llms = {
-    "summarizer":   LLMSetup("summarizer_llm",   temperature=0.3).get_llm(),
+    "summarizer":   LLMSetup("summarizer_llm",   temperature=0.4).get_llm(),
     "orchestrator": LLMSetup("orchestrator_llm", temperature=0.7).get_llm(),
-    "belief_updater": LLMSetup("belief_updater_llm", temperature=0.4).get_llm(),
+    "belief_updater": LLMSetup("belief_updater_llm", temperature=0.2).get_llm(),
 }
 
 # Global registry + session manager

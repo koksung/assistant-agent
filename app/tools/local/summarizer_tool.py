@@ -1,10 +1,19 @@
-from langchain.llms import OpenAI
+from app.prompts.summarizer_prompt import ONE_SHOT_USER_TEMPLATE
 
-class Summarizer:
-    def __init__(self, prompt_template):
-        self.prompt_template = prompt_template
-        self.llm = OpenAI(temperature=0.3)
+def summarize_abstract(text_to_be_summarized, summarizer_llm):
+    user_prompt = ONE_SHOT_USER_TEMPLATE.format(
+        target_words=150,
+        style="neutral technical",
+        format_hint="3–5 sentences",
+        text=text_to_be_summarized
+    )
 
-    def run(self, text, belief_vector):
-        formatted_prompt = self.prompt_template + f"\nBelief vector: {belief_vector}\n\nPaper:\n{text}"
-        return self.llm.predict(formatted_prompt)
+    # build messages for LLM
+    messages = [
+        {"role": "system", "content": "You are a helpful & competent research assistant. "
+                                      "Summarise the abstract of this academic paper."},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    result = summarizer_llm.invoke(messages)
+    return result.content
