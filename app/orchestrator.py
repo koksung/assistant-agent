@@ -40,6 +40,8 @@ def build_tool_input(step: Dict, task: UserTask, session: ConversationContext) -
     base = {"pdf_path": task.file_path} if getattr(task, "file_path", None) else {}
 
     if "raw text" in target or "extracted text" in target:
+        if getattr(task, "cache", None) and "extracted_struct" in task.cache:
+            return {**base, "structured": task.cache["extracted_struct"]}
         return {**base, "text": task.raw_text}
     if "user query" in target:
         return {**base, "query": task.user_query}
@@ -237,10 +239,8 @@ def _coerce_payload_for_tool(tool, payload: dict, task: UserTask) -> dict:
 
 
 def _format_capability_menu(tools: Dict[str, Any]) -> str:
-    """
-    Present both: (a) high-level capabilities, (b) concrete tools for reference.
-    """
     capability_hints = [
+        "- pdf.summarize: Summarize a paper quickly using the abstract (with fallback).",
         "- pdf.extract: Extracts structured text/sections from PDFs",
         "- equations: Extracts/retains LaTeX and equations where applicable",
         "- layout: Emphasizes structural fidelity in complex layouts",
@@ -280,6 +280,38 @@ def _is_extractor(tool_name: str) -> bool:
     return tool_name in {"local_pdf_extractor", "advanced_pdf_extractor_1", "advanced_pdf_extractor_2"}
 
 
+def _normalize_extraction_output(output: Any, task: "UserTask") -> None:
+    """
+    Ensures:
+      - task.raw_text: str (prompt-safe)
+      - task.cache["extracted_struct"]: dict (if provided)
+      - task.cache["extracted_text"]: str (longform)
+    """
+    text = ""
+
+    if isinstance(output, dict):
+        # Preserve structured form
+        task.cache = getattr(task, "cache", {})
+        task.cache["extracted_struct"] = output
+
+        # Build readable digest from string-like fields
+        parts = []
+        for k, v in output.items():
+            if isinstance(v, str) and v:
+                s = v if len(v) <= 500 else (v[:500] + "…")
+                parts.append(f"{str(k).upper()}: {s}")
+        # If no string fields were found, fall back to a compact str() of the dict
+        text = "\n".join(parts) if parts else str(output)
+
+    else:
+        # Coerce None/other types into text
+        text = "" if output is None else str(output)
+
+    task.raw_text = text
+    task.cache = getattr(task, "cache", {})
+    task.cache["extracted_text"] = text
+
+
 # --------------------------- Orchestration flow -------------------------------
 
 async def prepare_user_task(file, user_query: str, session: ConversationContext, llms: Dict[str, Any]):
@@ -294,7 +326,7 @@ async def prepare_user_task(file, user_query: str, session: ConversationContext,
 
     task = UserTask(
         file_path=file_path,
-        raw_text={},  # will fill after routed extraction
+        raw_text="",  # will fill after routed extraction
         user_query=user_query,
         task_type="summarize",
         metadata={"filename": file.filename}
@@ -313,7 +345,8 @@ async def prepare_user_task(file, user_query: str, session: ConversationContext,
     if not reg:
         # Safety: if registry is not initialized, fall back to a minimal local path
         from app.tools.local.pdf_extractor import extract_pdf_text
-        task.raw_text = extract_pdf_text(file_path)
+        output = extract_pdf_text(file_path)
+        _normalize_extraction_output(output, task)
     else:
         # Optional: add doc-aware hints using a filename sniff (cheap) before routing
         _enhance_doc_prefs_with_preview(session, file.filename)
@@ -324,7 +357,8 @@ async def prepare_user_task(file, user_query: str, session: ConversationContext,
             raise RuntimeError("No tool supports capability 'pdf.extract'")
 
         logger.info(f"[Router]: Selected '{prof.tool.name}' for pdf.extract (requires_network={prof.requires_network})")
-        task.raw_text = await _ainvoke_structured_tool(prof.tool, {"pdf_path": file_path})
+        output = await _ainvoke_structured_tool(prof.tool, {"pdf_path": file_path})
+        _normalize_extraction_output(output, task)
 
     # Now that we have text, run the conversation loop
     response = await conversation_loop(user_query, task, session, llms)
@@ -379,13 +413,22 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
     
     {_format_capability_menu(tools)}
     
-    ## Output Format
+    ## Output Format (must follow)
     Write each step on its own line as:
-    Use 'capability_token' on <what to operate on>
+    Use '<capability_token>' on <what to operate on>
+    
+    Allowed capability tokens ONLY:
+    - pdf.summarize
+    - pdf.extract
+    - equations
+    - layout
+    - summary.generate
     
     Examples:
-    Use 'pdf.extract' on file path
-    Use 'summary.generate' on user query + extracted text
+    Use 'pdf.summarize' on paper
+    Use 'pdf.extract' on pdf
+    Use 'equations' on extracted text
+    Use 'summary.generate' on user query + tool outputs
     """.strip()
 
     plan_obj = orchestrator_llm.invoke(cot_prompt)
@@ -396,7 +439,7 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
     # ----------------------- Step 2: Execute the plan ------------------------
     intermediate_outputs: List[Dict[str, Any]] = []
 
-    for step in parse_plan(plan_obj):
+    for step in parse_plan(plan_text):
         token = step.get("token")
         if not token:
             continue

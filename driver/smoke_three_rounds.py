@@ -64,7 +64,7 @@ def _print_plan(plan: Optional[str]) -> None:
 
 async def main():
     parser = argparse.ArgumentParser(description="Two-round smoke test for agentic LLM orchestrator.")
-    parser.add_argument("--pdf", default="data/ddpm-short.pdf", help="Path to the PDF (round 1).")
+    parser.add_argument("--pdf", default="data/ddpm.pdf", help="Path to the PDF (round 1).")
     parser.add_argument("--q1", default="Give me an initial high-level summary of this paper.",
                         help="Round 1 user query.")
     parser.add_argument("--q2", default="Summarize methodology and key equations.",
@@ -153,9 +153,9 @@ async def main():
         "round3_output": s3
     }
     os.makedirs("logs", exist_ok=True)
-    with open("logs/smoke_two_rounds.json", "w", encoding="utf-8") as f:
+    with open("logs/smoke_three_rounds.json", "w", encoding="utf-8") as f:
         json.dump(dump, f, indent=2, ensure_ascii=False)
-    print("\nSaved full run to logs/smoke_two_rounds.json")
+    print("\nSaved full run to logs/smoke_three_rounds.json")
 
 
 if __name__ == "__main__":
