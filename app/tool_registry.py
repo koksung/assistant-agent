@@ -150,12 +150,80 @@ from app.tools.local.pdf_extractor import extract_pdf_text, LocalPdfExtractorInp
 from app.tools.local.equation_renderer import EquationRendererInput, render_equation
 
 
+def _extract_pdf_text_adapter(pdf_path: str, **kwargs):
+    # Call the original function positionally so its param name doesn’t matter
+    return extract_pdf_text(pdf_path)
+
+
+def _equation_renderer_adapter(
+    markdown_text: str = "",
+    pdf_path: str = "",
+    include_inline: bool = False,
+    out_dir: str = "data/latex_equations",
+    dpi: int = 300,
+    fontsize: int = 20,
+):
+    payload = EquationRendererInput(
+        markdown_text=markdown_text,
+        pdf_path=pdf_path,
+        include_inline=include_inline,
+        out_dir=out_dir,
+        dpi=dpi,
+        fontsize=fontsize,
+    )
+    return render_equation(payload)
+
+
+def _nougat_adapter(**kwargs) -> Any:
+    """
+    Adapter so StructuredTool can pass validated kwargs.
+    Prefer calling Nougat with a `str pdf_path`, but fall back to model or kwargs.
+    """
+    model = NougatPdfExtractorInput(**kwargs)
+
+    # primary: most implementations accept a plain path string
+    if hasattr(model, "pdf_path"):
+        try:
+            return nougat_pdf_extraction(model.pdf_path)  # type: ignore[arg-type]
+        except TypeError:
+            pass
+
+    # fallback 1: function accepts the Pydantic model
+    try:
+        return nougat_pdf_extraction(model)  # type: ignore[arg-type]
+    except TypeError:
+        # fallback 2: function accepts kwargs
+        return nougat_pdf_extraction(**model.model_dump())
+
+
+def _docling_adapter(**kwargs) -> Any:
+    """
+    Adapter so StructuredTool can pass validated kwargs.
+    Prefer calling docling with a `str pdf_path`, but fall back to model or kwargs.
+    """
+    model = DoclingExtractorInput(**kwargs)
+
+    # primary: most implementations want a plain path string
+    if hasattr(model, "pdf_path"):
+        try:
+            return call_docling_pdf_extractor_remote(model.pdf_path)  # type: ignore[arg-type]
+        except TypeError:
+            pass
+
+    # fallback 1: function accepts the Pydantic model
+    try:
+        return call_docling_pdf_extractor_remote(model)  # type: ignore[arg-type]
+    except TypeError:
+        # fallback 2: function accepts kwargs
+        return call_docling_pdf_extractor_remote(**model.model_dump())
+
+
 def initialize_tool_registry() -> ToolRegistry:
     r = ToolRegistry()
 
     # Local PyMuPDF extractor
     local_pdf_extractor = StructuredTool.from_function(
-        func=extract_pdf_text,
+        func=_extract_pdf_text_adapter,
         name="local_pdf_extractor",
         description="Extract structured markdown text from academic PDFs using PyMuPDF.",
         args_schema=LocalPdfExtractorInput,
@@ -170,13 +238,12 @@ def initialize_tool_registry() -> ToolRegistry:
         requires_network=False,
         cost_hint=CostHint.LOW,
         latency_hint_ms=LatencyClass.LOW.value,
-        cost_label="Low",
         latency_label="Low",
     ))
 
     # Remote Nougat extractor (equations focus)
     remote_nougat_tool = StructuredTool.from_function(
-        func=nougat_pdf_extraction,
+        func=_nougat_adapter,
         name="advanced_pdf_extractor_1",
         description="Extract structured markdown and LaTeX equations from academic PDFs using Nougat.",
         args_schema=NougatPdfExtractorInput,
@@ -191,13 +258,12 @@ def initialize_tool_registry() -> ToolRegistry:
         requires_network=True,
         cost_hint=CostHint.LOW,
         latency_hint_ms=LatencyClass.MID.value,
-        cost_label="Low",
         latency_label="Mid",
     ))
 
     # Remote Docling extractor (layout/structure focus)
     remote_docling_tool = StructuredTool.from_function(
-        func=call_docling_pdf_extractor_remote,
+        func=_docling_adapter,
         name="advanced_pdf_extractor_2",
         description="Extract structured markdown text from academic PDFs using Docling.",
         args_schema=DoclingExtractorInput,
@@ -212,13 +278,12 @@ def initialize_tool_registry() -> ToolRegistry:
         requires_network=True,
         cost_hint=CostHint.MEDIUM,
         latency_hint_ms=LatencyClass.HIGH.value,
-        cost_label="Moderate",
         latency_label="High",
     ))
 
     # Equation Renderer (local → images)
     equation_renderer_tool = StructuredTool.from_function(
-        func=render_equation,
+        func=_equation_renderer_adapter,
         name="equation_renderer",
         description="Render LaTeX equations (from markdown or via Nougat) into PNG images. Returns list of file paths.",
         args_schema=EquationRendererInput,
@@ -233,7 +298,6 @@ def initialize_tool_registry() -> ToolRegistry:
         requires_network=False,  # local rendering
         cost_hint=CostHint.LOW,
         latency_hint_ms=LatencyClass.LOW.value,
-        cost_label="Low",
         latency_label="Low",
     ))
 

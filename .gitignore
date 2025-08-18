@@ -2,5 +2,6 @@
 *.pdf
 *.xml
 *.iml
+/logs/
 /pdfs/
 /data/latex_equations/

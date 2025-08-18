@@ -68,3 +68,7 @@ async def interact(request: InteractionRequest):
 
     session_manager.update_session(session)
     return JSONResponse(content={"response": result})
+
+
+# run it
+# uvicorn app.main:app --host 127.0.0.1 --port 8120 --reload

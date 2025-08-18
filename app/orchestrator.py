@@ -33,38 +33,37 @@ def parse_plan(plan_str: str) -> List[Dict[str, str]]:
     return steps
 
 
-def build_tool_input(step: Dict[str, str], task: UserTask, session: ConversationContext) -> Dict[str, Any]:
-    """
-    Heuristics to map the planner's 'on ...' phrase to kwargs for tools.
-    Extend as needed.
-    """
+def build_tool_input(step: Dict, task: UserTask, session: ConversationContext) -> Dict:
     target = step.get("input_target", "").lower()
 
+    # Always try to include pdf_path when available
+    base = {"pdf_path": task.file_path} if getattr(task, "file_path", None) else {}
+
     if "raw text" in target or "extracted text" in target:
-        return {"text": task.raw_text}
+        return {**base, "text": task.raw_text}
     if "user query" in target:
-        return {"query": task.user_query}
+        return {**base, "query": task.user_query}
     if "beliefs" in target:
-        return {"beliefs": session.belief_state}
+        return {**base, "beliefs": session.belief_state}
     if "file path" in target or "pdf" in target or target == "":
-        # default to pdf_path if not specified
-        return {"pdf_path": task.file_path}
+        return {**base}
 
     # fall-through: supply a broad context
     return {
+        **base,
         "text": task.raw_text,
         "query": task.user_query,
         "beliefs": session.belief_state,
-        "pdf_path": task.file_path,
     }
 
 
 def build_summary_prompt(
-    task: UserTask,
-    intermediate_outputs: List[Dict[str, Any]],
-    belief_state: Dict[str, Any],
-    user_input: str
-) -> str:
+        task: UserTask,
+        intermediate_outputs: List[Dict[str, Any]],
+        belief_state: Dict[str, Any],
+        user_input: str
+    ) -> str:
+    # --- belief formatting ---
     belief = (belief_state or {}).get("belief", {})
     archetypes = belief.get("archetype_probs", {}) or {}
     preferences = belief.get("preferences", {}) or {}
@@ -76,15 +75,60 @@ def build_summary_prompt(
         f"- {k.replace('_', ' ').title()}: {v}" for k, v in preferences.items()
     ) or "Not specified"
 
+    # Pull a compact paper digest if available
+    paper_digest = ""
+    if getattr(task, "cache", None) and "extracted_text" in task.cache:
+        # make/keep a cached digest to avoid re-summarizing every round
+        if "paper_digest" not in task.cache:
+            raw = task.cache["extracted_text"]
+            # super-cheap digest: first 1500 chars (or you can LLM-summarize once)
+            task.cache["paper_digest"] = raw[:1500] + (" …[truncated]" if len(raw) > 1500 else "")
+        paper_digest = task.cache["paper_digest"]
+    paper_digest_block = f"\n## Paper Digest (short)\n{paper_digest}\n" if paper_digest else ""
+
+    # --- helpers ---
+    def _to_static_url(p: str) -> str:
+        """
+        Convert a filesystem path to a URL that FastAPI can serve.
+        If you've mounted StaticFiles(directory='data') at '/static',
+        'data/latex_equations/foo.png' -> '/static/latex_equations/foo.png'.
+        Otherwise, fall back to the raw path.
+        """
+        s = str(p).replace("\\", "/")
+        return "/static/" + s.split("data/", 1)[-1] if "data/" in s else s
+
+    # --- collect tool traces & outputs ---
     intermediate_summary = ""
     tool_trace = ""
+    eq_imgs: List[str] = []
+
     for item in intermediate_outputs:
         cap = item.get("capability", "unknown.capability")
         tool_name = item.get("tool", "unknown_tool")
-        output = str(item.get("output", "")).strip()
-        tool_trace += f"- {cap} → {tool_name}\n"
-        intermediate_summary += f"\n### Output from `{tool_name}` ({cap})\n{output}\n"
+        out = item.get("output")
 
+        # trace line
+        tool_trace += f"- {cap} → {tool_name}\n"
+
+        # pretty-print output (stringify; keep lightweight)
+        out_str = str(out).strip()
+        intermediate_summary += f"\n### Output from `{tool_name}` ({cap})\n{out_str}\n"
+
+        # collect equation images if present
+        if (cap == "equations") or (tool_name == "equation_renderer"):
+            if isinstance(out, dict):
+                imgs = out.get("images") or []
+                if isinstance(imgs, list):
+                    eq_imgs.extend(str(p) for p in imgs)
+
+    # --- build a ready-to-paste markdown block for equation previews ---
+    eq_section = ""
+    if eq_imgs:
+        # show up to 8 previews to keep the output tidy
+        previews = "\n".join(f"![Equation]({_to_static_url(p)})" for p in eq_imgs[:8])
+        eq_section = f"\n## Rendered Equation Previews\n{previews}\n"
+
+    # --- final prompt ---
     return f"""
     You are an academic research assistant helping summarize scientific papers.
     
@@ -99,6 +143,8 @@ def build_summary_prompt(
     ### User Preferences
     {formatted_preferences}
     
+    {paper_digest_block}
+    
     ## Tools Chosen by Router
     {tool_trace if tool_trace else "- (none)"}
     
@@ -110,8 +156,10 @@ def build_summary_prompt(
     - Appropriate section headers (e.g., ## Abstract, ## Methodology)
     - Highlights aligned with the user’s archetype
     - Clear structure, precise explanations, and user-adaptive tone
+    
+    ### If Present — Paste This Markdown Block At The End (verbatim)
+    {eq_section if eq_section else "(no previews provided)"}
     """.strip()
-
 
 # ---------------------------- Routing helpers --------------------------------
 
@@ -156,6 +204,38 @@ def _enhance_doc_prefs_with_preview(session: ConversationContext, preview_text: 
     session.belief_state = belief_state
 
 
+def _tool_expected_fields(tool) -> set[str]:
+    schema = getattr(tool, "args_schema", None)
+    if not schema:
+        return set()
+    fields = getattr(schema, "model_fields", None) or getattr(schema, "__fields__", None)
+    if isinstance(fields, dict):
+        return set(fields.keys())
+    ann = getattr(schema, "__annotations__", None)
+    if isinstance(ann, dict):
+        return set(ann.keys())
+    return set()
+
+
+def _coerce_payload_for_tool(tool, payload: dict, task: UserTask) -> dict:
+    expected = _tool_expected_fields(tool)
+    data = dict(payload)
+
+    # If tool expects pdf_path and we have it on the task, inject it.
+    if "pdf_path" in expected and "pdf_path" not in data and getattr(task, "file_path", None):
+        data["pdf_path"] = task.file_path
+
+    # If tool does NOT expect 'text', drop it (helps Nougat which wants only pdf_path)
+    if expected and "text" in data and "text" not in expected:
+        data.pop("text", None)
+
+    # Prune to expected keys to avoid extra-field validation issues
+    if expected:
+        data = {k: v for k, v in data.items() if k in expected}
+
+    return data
+
+
 def _format_capability_menu(tools: Dict[str, Any]) -> str:
     """
     Present both: (a) high-level capabilities, (b) concrete tools for reference.
@@ -191,6 +271,15 @@ async def _ainvoke_structured_tool(tool, kwargs: Dict[str, Any]):
     return res
 
 
+def _clip(s: str, n: int = 1200) -> str:
+    s = str(s or "")
+    return s if len(s) <= n else (s[:n] + " …[truncated]")
+
+
+def _is_extractor(tool_name: str) -> bool:
+    return tool_name in {"local_pdf_extractor", "advanced_pdf_extractor_1", "advanced_pdf_extractor_2"}
+
+
 # --------------------------- Orchestration flow -------------------------------
 
 async def prepare_user_task(file, user_query: str, session: ConversationContext, llms: Dict[str, Any]):
@@ -205,7 +294,7 @@ async def prepare_user_task(file, user_query: str, session: ConversationContext,
 
     task = UserTask(
         file_path=file_path,
-        raw_text="",  # will fill after routed extraction
+        raw_text={},  # will fill after routed extraction
         user_query=user_query,
         task_type="summarize",
         metadata={"filename": file.filename}
@@ -216,7 +305,7 @@ async def prepare_user_task(file, user_query: str, session: ConversationContext,
 
     # Seed beliefs (if absent) using the user's query
     if not session.belief_state:
-        insight = update_beliefs(user_query)
+        insight = update_beliefs(user_query, llms["belief_updater"])
         session.update_beliefs(insight)
 
     # Route the initial PDF extraction (instead of hard-coding local extractor)
@@ -251,6 +340,7 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
     reg = get_registry()
     orchestrator_llm = llms["orchestrator"]
     summarizer_llm = llms["summarizer"]
+    session.compact_history(summarizer_llm, max_chars=12000, keep_last=2, summary_target_chars=1200)
 
     # Add doc hints from actual text preview before planning (improves routing on step 1)
     preview = (task.get_full_text() or "")[:1200]
@@ -298,18 +388,21 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
     Use 'summary.generate' on user query + extracted text
     """.strip()
 
-    plan = orchestrator_llm.invoke(cot_prompt)
-    session.add_message("orchestrator", str(plan))
+    plan_obj = orchestrator_llm.invoke(cot_prompt)
+    plan_text = getattr(plan_obj, "content", plan_obj)  # use .content if available
+    plan_text = str(plan_text)
+    session.add_message("orchestrator", plan_text)
 
     # ----------------------- Step 2: Execute the plan ------------------------
     intermediate_outputs: List[Dict[str, Any]] = []
 
-    for step in parse_plan(plan):
+    for step in parse_plan(plan_obj):
         token = step.get("token")
         if not token:
             continue
 
         input_data = build_tool_input(step, task, session)
+
         capability = token  # treat token as capability by default
 
         # Resolve: try as concrete tool name first (back-compat), else as capability
@@ -324,21 +417,51 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
             logger.warning(f"[Router]: No tool found for '{token}' (capability or name). Skipping.")
             continue
 
+        # coerce payload for the specific tool’s schema
+        input_data = _coerce_payload_for_tool(prof.tool, input_data, task)
         logger.info(f"[Tool]: Executing {prof.tool.name} for token '{token}' with inputs: {input_data}")
         try:
             output = await _ainvoke_structured_tool(prof.tool, input_data)
-            intermediate_outputs.append({"tool": prof.tool.name, "capability": token, "output": output})
+            digest_output = output
+            if _is_extractor(prof.tool.name):
+                # store full text off-prompt (no token cost)
+                try:
+                    # keep the full thing for retrieval/summarization later
+                    if not hasattr(task, "cache"):
+                        task.cache = {}
+                    task.cache["extracted_text"] = str(output)
+                except (Exception, ):
+                    pass
+                # only include a clipped preview in the prompt
+                digest_output = _clip(str(output), 1200)
+
+            elif prof.tool.name == "equation_renderer":
+                # keep only count + first few paths in prompt
+                if isinstance(output, dict):
+                    imgs = output.get("images", []) or []
+                    digest_output = {
+                        "count": output.get("count", len(imgs)),
+                        "images": imgs[:8],  # previews; full list is unnecessary
+                    }
+
+            intermediate_outputs.append({
+                "tool": prof.tool.name,
+                "capability": token,
+                "output": digest_output
+            })
         except Exception as e:
             logger.exception(f"[Tool]: {prof.tool.name} failed: {e}")
             intermediate_outputs.append({"tool": prof.tool.name, "capability": token, "output": f"[ERROR] {e}"})
 
     # ----------------------- Step 3: Final summarization ---------------------
     summary_prompt = build_summary_prompt(task, intermediate_outputs, session.belief_state, user_input)
-    response = summarizer_llm.invoke(summary_prompt)
+    resp_obj = summarizer_llm.invoke(summary_prompt)
+    response = getattr(resp_obj, "content", resp_obj)
+    response = str(response)
 
     # ----------------------- Step 4: Belief update ---------------------------
     full_context = "\n".join([f"{m['role']}: {m['content']}" for m in session.conversation_history])
-    new_insight = update_beliefs(full_context)
+    new_insight = update_beliefs(full_context, llms["belief_updater"])
     session.update_beliefs(new_insight)
     session.add_message("summarizer", response)
 
