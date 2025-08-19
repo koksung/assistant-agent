@@ -131,6 +131,11 @@ class ToolRegistry:
                 s += 2.0
 
             # user preferences
+            prefs = ctx.preferences or {}
+            if prefs.get("prefer_console_equations") and t.tool.name == "latex_console_renderer":
+                s += 6.0
+            if prefs.get("prefer_image_equations") and t.tool.name == "equation_renderer":
+                s += 5.0
             if ctx.preferences.get("prefer_local") and not t.requires_network:
                 s += 2.0
 
@@ -147,9 +152,13 @@ class ToolRegistry:
 from app.tools.remote.nougat_pdf_extractor import nougat_pdf_extraction, NougatPdfExtractorInput
 from app.tools.remote.docling_pdf_extractor.tool import call_docling_pdf_extractor_remote, DoclingExtractorInput
 from app.tools.local.pdf_extractor import extract_pdf_text, LocalPdfExtractorInput
-from app.tools.local.equation_renderer import EquationRendererInput, render_equation
+from app.tools.local.equation_renderer import EquationRendererInput, LatexConsoleRendererInput, parse_latex_equation, render_equation
 from app.tools.local.summarizer_tool import GenerateSummaryInput, generate_summary
 from app.tools.local.abstract_extractor import abstract_summary as _abstract_summary_fn, AbstractSummaryInput
+
+def _latex_console_renderer_adapter(latex_string: str) -> str:
+    return parse_latex_equation(latex_string)
+
 
 def _extract_pdf_text_adapter(pdf_path: str, **kwargs):
     # Call the original function positionally so its param name doesn’t matter
@@ -307,6 +316,26 @@ def initialize_tool_registry() -> ToolRegistry:
         limitations="Requires a LaTeX installation for usetex; invalid LaTeX may fail to render.",
         capabilities=["equations", "visualization"],
         requires_network=False,  # local rendering
+        cost_hint=CostHint.LOW,
+        latency_hint_ms=LatencyClass.LOW.value,
+        latency_label="Low",
+    ))
+
+    # LaTeX Console Renderer (local → Unicode text)
+    latex_console_renderer_tool = StructuredTool.from_function(
+        func=_latex_console_renderer_adapter,
+        name="latex_console_renderer",
+        description="Parse a single LaTeX equation into console-friendly Unicode text using Sympy, ideal for CLI display of specific equations from queries like 'Which equation is most important?'.",
+        args_schema=LatexConsoleRendererInput,
+        return_direct=True
+    )
+    r.register_tool(ToolProfile(
+        tool=latex_console_renderer_tool,
+        purpose="Render a single LaTeX equation as Unicode text for console-based display, suitable for math-oriented queries in a CLI environment.",
+        strengths="Fast, local parsing with Sympy; produces clean Unicode for CLI; handles specific equation queries.",
+        limitations="Limited to valid LaTeX equations; complex equations may have imperfect Unicode rendering.",
+        capabilities=["equations"],
+        requires_network=False,
         cost_hint=CostHint.LOW,
         latency_hint_ms=LatencyClass.LOW.value,
         latency_label="Low",

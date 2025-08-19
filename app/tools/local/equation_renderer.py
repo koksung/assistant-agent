@@ -6,6 +6,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 plt.ioff()
 
+from sympy import pretty
+from sympy.parsing.latex import parse_latex
 from typing import List, Dict, Any
 from pydantic import BaseModel, Field
 from app.utils.logger import get_logger
@@ -36,7 +38,41 @@ class EquationRendererInput(BaseModel):
     fontsize: int = Field(default=20, ge=6, le=64, description="Font size for rendering.")
 
 
+class LatexConsoleRendererInput(BaseModel):
+    latex_string: str = Field(..., description="Single LaTeX equation to render as console-friendly Unicode text.")
+
+
 # ------------------------------ Utilities --------------------------------
+
+def enhance_unicode(expr_str):
+    """Enhance sympy's Unicode output with better symbols"""
+    replacements = {
+        'alpha': 'α',
+        'beta': 'β',
+        'gamma': 'γ',
+        'epsilon': 'ε',
+        'theta': 'θ',
+        'sigma': 'σ',
+        'mu': 'μ',
+        'pi': 'π',
+        'Sum': '∑',
+        'Product': '∏',
+        'sqrt': '√',
+        'int': '∫',
+        'infinity': '∞',
+        'partial': '∂',
+        'nabla': '∇',
+        'Element': '∈',
+        'ForAll': '∀',
+        'Exists': '∃',
+        '\\mathbb{E}': '𝔼',
+        '\\mathbb{R}': 'ℝ',
+    }
+
+    result = expr_str
+    for key, value in replacements.items():
+        result = result.replace(key, value)
+    return result
 
 def _latex_str_hash(latex_str: str) -> str:
     return hashlib.md5(latex_str.encode("utf-8")).hexdigest()[:8]
@@ -77,6 +113,16 @@ def _render_single_equation(eqn: str, out_dir: str, dpi: int, fontsize: int) -> 
 
 
 # ------------------------------ Public API --------------------------------
+
+def parse_latex_equation(latex_str):
+    """Parse LaTeX string and return enhanced Unicode output"""
+    try:
+        expr = parse_latex(latex_str)
+        unicode_eq = pretty(expr, use_unicode=True)
+        return enhance_unicode(str(unicode_eq))
+    except Exception as e:
+        return f"Parsing error: {str(e)}"
+
 
 def render_equation_images(
     markdown_text: str,

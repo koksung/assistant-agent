@@ -19,12 +19,14 @@ aiohttp==3.12.15
     #   fsspec
 aiosignal==1.4.0
     # via aiohttp
-albucore==0.0.24
-    # via albumentations
-albumentations==2.0.8
-    # via nougat-ocr
+albumentations==1.3.0
+    # via
+    #   -r requirements-dev.in
+    #   nougat-ocr
 annotated-types==0.7.0
     # via pydantic
+antlr4-python3-runtime==4.11.1
+    # via -r requirements-dev.in
 anyio==4.10.0
     # via
     #   httpx
@@ -153,7 +155,9 @@ jinja2==3.1.6
 jiter==0.10.0
     # via openai
 joblib==1.5.1
-    # via nltk
+    # via
+    #   nltk
+    #   scikit-learn
 jsonlines==3.1.0
     # via docling-ibm-models
 jsonpatch==1.33
@@ -242,7 +246,6 @@ numpy==2.3.2
     # via
     #   -r requirements-dev.in
     #   accelerate
-    #   albucore
     #   albumentations
     #   contourpy
     #   datasets
@@ -252,8 +255,10 @@ numpy==2.3.2
     #   matplotlib
     #   opencv-python-headless
     #   pandas
+    #   qudida
     #   safetensors
     #   scikit-image
+    #   scikit-learn
     #   scipy
     #   shapely
     #   tifffile
@@ -266,11 +271,11 @@ openai==1.99.9
     #   langchain-openai
 opencv-python-headless==4.11.0.86
     # via
-    #   albucore
     #   albumentations
     #   docling-ibm-models
     #   easyocr
     #   nougat-ocr
+    #   qudida
 openpyxl==3.1.5
     # via docling
 orjson==3.11.2
@@ -335,7 +340,6 @@ pycparser==2.22
 pydantic==2.11.7
     # via
     #   -r requirements-dev.in
-    #   albumentations
     #   docling
     #   docling-core
     #   docling-ibm-models
@@ -412,6 +416,8 @@ pyyaml==6.0.2
     #   pytorch-lightning
     #   transformers
     #   uvicorn
+qudida==0.0.4
+    # via albumentations
 rapidfuzz==3.13.0
     # via levenshtein
 referencing==0.36.2
@@ -458,7 +464,11 @@ safetensors[numpy,torch]==0.6.2
     #   docling-ibm-models
     #   transformers
 scikit-image==0.25.2
-    # via easyocr
+    # via
+    #   albumentations
+    #   easyocr
+scikit-learn==1.7.1
+    # via qudida
 scipy==1.16.1
     # via
     #   -r requirements-dev.in
@@ -466,6 +476,7 @@ scipy==1.16.1
     #   docling
     #   easyocr
     #   scikit-image
+    #   scikit-learn
 sconf==0.2.5
     # via nougat-ocr
 semchunk==2.2.2
@@ -476,8 +487,6 @@ shapely==2.1.1
     # via easyocr
 shellingham==1.5.4
     # via typer
-simsimd==6.5.1
-    # via albucore
 six==1.17.0
     # via python-dateutil
 sniffio==1.3.1
@@ -490,16 +499,18 @@ sqlalchemy==2.0.43
     # via langchain
 starlette==0.47.2
     # via fastapi
-stringzilla==3.12.6
-    # via albucore
 sympy==1.14.0
-    # via torch
+    # via
+    #   -r requirements-dev.in
+    #   torch
 tabulate==0.9.0
     # via
     #   docling-core
     #   docling-parse
 tenacity==9.1.2
     # via langchain-core
+threadpoolctl==3.6.0
+    # via scikit-learn
 tifffile==2025.6.11
     # via scikit-image
 tiktoken==0.11.0
@@ -576,6 +587,7 @@ typing-extensions==4.14.1
     #   python-docx
     #   python-pptx
     #   pytorch-lightning
+    #   qudida
     #   referencing
     #   sqlalchemy
     #   starlette
