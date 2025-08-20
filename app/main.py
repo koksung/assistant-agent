@@ -5,7 +5,9 @@ import io
 import os
 import asyncio
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
@@ -45,6 +47,31 @@ async def lifespan(_: FastAPI):
     logger.info("Shutting down...")
 
 app = FastAPI(lifespan=lifespan)
+# Serve files under data/* at /static/*
+app.mount("/static", StaticFiles(directory="data"), name="static")
+# Serve your index.html from / (adjust the folder name if different)
+FRONTEND_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "frontend"))
+app.mount("/ui", StaticFiles(directory=FRONTEND_DIR, html=True), name="ui")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # or ["http://127.0.0.1:5500", "http://localhost:5500"] if you serve files
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.post("/interact_file/")
+async def interact_file(
+    user_id: str = Form(...),
+    user_query: str = Form(""),
+    file: UploadFile = File(...)
+):
+    logger.info(f"New file interaction from user: {user_id} | upload: {file.filename}")
+    session = session_manager.get_or_create_session(user_id)
+    result = await prepare_user_task(file, user_query=user_query, session=session, llms=llms)
+    session_manager.update_session(session)
+    return JSONResponse(content={"response": result})
 
 
 @app.post("/interact/")
@@ -71,4 +98,5 @@ async def interact(request: InteractionRequest):
 
 
 # run it
-# uvicorn app.main:app --host 127.0.0.1 --port 8120 --reload
+# uvicorn app.main:app --host 127.0.0.1 --port 8120
+# front-end is at: http://127.0.0.1:8120/ui/

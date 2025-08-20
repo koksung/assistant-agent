@@ -8,7 +8,7 @@ plt.ioff()
 
 from sympy import pretty
 from sympy.parsing.latex import parse_latex
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 from app.utils.logger import get_logger
 from app.tools.remote.nougat_pdf_extractor import call_nougat_api
@@ -16,10 +16,11 @@ from app.tools.remote.nougat_pdf_extractor import call_nougat_api
 logger = get_logger(__name__)
 
 # Enable LaTeX rendering using actual LaTeX (requires TeX installation)
+# Added amsfonts + physics for \mathbb and \qty, etc.
 plt.rcParams.update({
     "text.usetex": True,
     "font.family": "serif",
-    "text.latex.preamble": r"\usepackage{amsmath} \usepackage{amssymb} \usepackage{mathtools}"
+    "text.latex.preamble": r"\usepackage{amsmath}\usepackage{amssymb}\usepackage{amsfonts}\usepackage{mathtools}\usepackage{physics}"
 })
 
 
@@ -44,7 +45,7 @@ class LatexConsoleRendererInput(BaseModel):
 
 # ------------------------------ Utilities --------------------------------
 
-def enhance_unicode(expr_str):
+def enhance_unicode(expr_str: str) -> str:
     """Enhance sympy's Unicode output with better symbols"""
     replacements = {
         'alpha': 'α',
@@ -68,22 +69,57 @@ def enhance_unicode(expr_str):
         '\\mathbb{E}': '𝔼',
         '\\mathbb{R}': 'ℝ',
     }
-
     result = expr_str
     for key, value in replacements.items():
         result = result.replace(key, value)
     return result
 
+
 def _latex_str_hash(latex_str: str) -> str:
     return hashlib.md5(latex_str.encode("utf-8")).hexdigest()[:8]
 
+
 def _sanitize_latex_for_matplotlib(eqn: str) -> str:
-    eqn = re.sub(r"\\tag\{[^}]*}", "", eqn)         # remove \tag{...}
-    eqn = eqn.replace(r"\coloneqq", r":=")           # normalize coloneqq
-    eqn = eqn.rstrip("\\").strip()                   # trailing slashes/spaces
-    eqn = re.sub(r"_\{\s*(\\\w+)\s*}", r"_{\1}", eqn)
-    eqn = re.sub(r"\\\s+", r"\\", eqn)               # cleanup stray spaces after backslashes
+    """
+    Sanitize/normalize Nougat-extracted LaTeX for Matplotlib's usetex/mathtools.
+    - Remove \tag{...}
+    - Normalize \coloneqq
+    - Collapse stray spaces around subscripts/superscripts
+    - Normalize \\mathbf{ ... } spacing
+    - Replace \qty delimiters (physics) with \left...\right... so it also works if physics is absent
+    - Trim trailing slashes/spaces and collapse stray backslashes
+    """
+    if not isinstance(eqn, str):
+        eqn = str(eqn or "")
+
+    # Remove \tag{...}
+    eqn = re.sub(r"\\tag\{[^}]*\}", "", eqn)
+
+    # Normalize \coloneqq
+    eqn = eqn.replace(r"\coloneqq", r":=")
+
+    # Collapse spaces inside subscripts/superscripts: _{ x } -> _{x}
+    eqn = re.sub(r"(_|\^)\s*\{\s*(.*?)\s*\}", r"\1{\2}", eqn)
+
+    # Tighten \mathbf{ ... } etc.
+    eqn = re.sub(r"\\mathbf\{\s*(.*?)\s*\}", r"\\mathbf{\1}", eqn)
+
+    # Replace \qty(...) / \qty[...] / \qty{...} with \left..\right..
+    eqn = re.sub(r"\\qty\s*\(\s*(.*?)\s*\)", r"\\left( \1 \\right)", eqn)
+    eqn = re.sub(r"\\qty\s*\[\s*(.*?)\s*\]", r"\\left[ \1 \\right]", eqn)
+    eqn = re.sub(r"\\qty\s*\{\s*(.*?)\s*\}", r"\\left\\{ \1 \\right\\}", eqn)
+
+    # Remove double spaces after backslashes like "\\ " -> "\"
+    eqn = re.sub(r"\\\s+", r"\\", eqn)
+
+    # Common stray space before braces in commands: \mathbf{x }_{t} -> \mathbf{x}_{t}
+    eqn = re.sub(r"(\\[A-Za-z]+)\{\s*([^}]*)\s*\}\s*(_|\^)", r"\1{\2}\3", eqn)
+
+    # Trim trailing backslashes/spaces
+    eqn = eqn.rstrip("\\").strip()
+
     return eqn
+
 
 def _extract_latex_equations(markdown_text: str, include_inline: bool = False) -> List[str]:
     """
@@ -98,23 +134,68 @@ def _extract_latex_equations(markdown_text: str, include_inline: bool = False) -
     cleaned = [eq.replace("\\\\", "\\").strip() for eq in all_eqs]
     return cleaned
 
+
+def _fallback_for_mathtext(eqn: str) -> str:
+    """
+    Prepare a LaTeX snippet for mathtext rendering (no system LaTeX).
+    - Replace some macros not supported by mathtext.
+    """
+    s = eqn
+    # Blackboard bold often limited: map to \mathrm
+    s = s.replace(r"\mathbb{E}", r"\mathrm{E}")
+    s = s.replace(r"\mathbb{R}", r"\mathrm{R}")
+    # Remove color/phantom if present
+    s = re.sub(r"\\color\{[^}]*\}", "", s)
+    s = re.sub(r"\\phantom\{[^}]*\}", "", s)
+    # \text{...} is limited in mathtext; approximate with \mathrm{...}
+    s = re.sub(r"\\text\{([^}]*)\}", r"\\mathrm{\1}", s)
+    return s
+
+
 def _render_single_equation(eqn: str, out_dir: str, dpi: int, fontsize: int) -> str:
     os.makedirs(out_dir, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(14, 3))
-    ax.axis("off")
-    latex_eq = r"$" + _sanitize_latex_for_matplotlib(eqn) + r"$"
-    ax.text(0.5, 0.5, latex_eq, fontsize=fontsize, ha="center", va="center")
-    filename = os.path.join(out_dir, f"equation_{_latex_str_hash(eqn)}.png")
-    plt.savefig(filename, bbox_inches="tight", dpi=dpi, transparent=True)
-    plt.close(fig)
-    normalized_fn = os.path.normpath(filename)
-    logger.info(f"[equation_renderer] Saved: {normalized_fn}")
-    return normalized_fn
+    sanitized = _sanitize_latex_for_matplotlib(eqn)
+    latex_eq = r"$" + sanitized + r"$"
+
+    # First try with full LaTeX (usetex=True)
+    try:
+        fig, ax = plt.subplots(figsize=(14, 3))
+        ax.axis("off")
+        ax.text(0.5, 0.5, latex_eq, fontsize=fontsize, ha="center", va="center")
+        filename = os.path.join(out_dir, f"equation_{_latex_str_hash(eqn)}.png")
+        plt.savefig(filename, bbox_inches="tight", dpi=dpi, transparent=True)
+        plt.close(fig)
+        normalized_fn = os.path.normpath(filename)
+        logger.info(f"[equation_renderer] Saved: {normalized_fn}")
+        return normalized_fn
+    except Exception as e:
+        logger.exception(f"[equation_renderer] LaTeX render failed (usetex=True). Trying mathtext fallback. Eq: {sanitized} | Error: {e}")
+
+    # Fallback: try to render with mathtext (usetex=False)
+    fallback = None
+    try:
+        fallback = _fallback_for_mathtext(sanitized)
+        mt_eq = r"$" + fallback + r"$"
+        with plt.rc_context({"text.usetex": False}):
+            fig2, ax2 = plt.subplots(figsize=(14, 3))
+            ax2.axis("off")
+            ax2.text(0.5, 0.5, mt_eq, fontsize=fontsize, ha="center", va="center")
+            filename = os.path.join(out_dir, f"equation_{_latex_str_hash(eqn)}.png")
+            plt.savefig(filename, bbox_inches="tight", dpi=dpi, transparent=True)
+            plt.close(fig2)
+            normalized_fn = os.path.normpath(filename)
+            logger.info(f"[equation_renderer] Saved (mathtext fallback): {normalized_fn}")
+            return normalized_fn
+    except Exception as e2:
+        logger.exception(f"[equation_renderer] Mathtext fallback failed. Eq: {fallback} | Error: {e2}")
+
+    # If both fail, re-raise a clean error for the caller to record in 'failed'
+    raise RuntimeError("Equation render failed for snippet: " + eqn)
 
 
 # ------------------------------ Public API --------------------------------
 
-def parse_latex_equation(latex_str):
+def parse_latex_equation(latex_str: str) -> str:
     """Parse LaTeX string and return enhanced Unicode output"""
     try:
         expr = parse_latex(latex_str)
@@ -136,11 +217,13 @@ def render_equation_images(
     Returns: {"count": int, "images": [paths], "failed": [latex_snippets]}
     """
     equations = _extract_latex_equations(markdown_text or "", include_inline=include_inline)
-    images, failed = [], []
+    images: List[str] = []
+    failed: List[str] = []
     for eq in equations:
         try:
             images.append(_render_single_equation(eq, out_dir=out_dir, dpi=dpi, fontsize=fontsize))
         except Exception as e:
+            # Log sanitized snippet to help debugging
             logger.exception(f"[equation_renderer] Failed to render: {eq} | {e}")
             failed.append(eq)
     return {"count": len(images), "images": images, "failed": failed}

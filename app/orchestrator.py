@@ -35,39 +35,53 @@ def build_tool_input(step: Dict, task: UserTask, session: ConversationContext) -
     # Always try to include pdf_path when available
     base = {"pdf_path": task.file_path} if getattr(task, "file_path", None) else {}
 
-    # >>> NEW: Treat both equation renderers similarly when extracting a single LaTeX string.
+    # >>> UPDATED: Treat both equation renderers similarly when extracting a single LaTeX string.
     wants_single_eq = (
-            "equations" in token
-            or "latex_console_renderer" in token
-            or "equation_renderer" in token
+        "equations" in token
+        or "latex_console_renderer" in token
+        or "equation_renderer" in token
     )
 
-    if wants_single_eq and "section" in target:
-        section_id = None
-        if m := re.search(r"section (\d+)", target, re.IGNORECASE):
-            section_id = m.group(1)
+    # If the planner asked for an equation, try to extract one:
+    if wants_single_eq:
+        # 1) Section-targeted extraction (unchanged)
+        if "section" in target:
+            section_id = None
+            if m := re.search(r"section (\d+)", target, re.IGNORECASE):
+                section_id = m.group(1)
 
-        if section_id and getattr(task, "cache", None) and "extracted_struct" in task.cache:
-            sections = task.cache["extracted_struct"].get("sections", [])
-            target_section = next((s for s in sections if s.get("id") == section_id), None)
-            if target_section and "equations" in target_section:
-                equations = target_section["equations"]
-                latex = equations[0]["latex"] if equations else ""
-                return {**base, "latex_string": latex}
+            if section_id and getattr(task, "cache", None) and "extracted_struct" in task.cache:
+                sections = task.cache["extracted_struct"].get("sections", [])
+                target_section = next((s for s in sections if s.get("id") == section_id), None)
+                if target_section and "equations" in target_section:
+                    equations = target_section["equations"]
+                    latex = equations[0]["latex"] if equations else ""
+                    if latex:
+                        return {**base, "latex_string": latex}
 
+        # 2) Generic fallback from raw_text (NOW runs even if no 'section' in target)
         if getattr(task, "raw_text", ""):
             equations = re.findall(r"\$\$([^$]+)\$\$|\$([^$]+)\$", task.raw_text)
-            latex = equations[0][0] or equations[0][1] if equations else ""
-            return {**base, "latex_string": latex}
+            if equations:
+                latex = equations[0][0] or equations[0][1]
+                if latex:
+                    return {**base, "latex_string": latex}
+        # If we couldn't extract, we DON'T return yet — let other branches supply broader context.
 
     if "raw text" in target or "extracted text" in target:
         if getattr(task, "cache", None) and "extracted_struct" in task.cache:
             return {**base, "structured": task.cache["extracted_struct"]}
         return {**base, "text": task.raw_text}
+
     if "user query" in target:
+        # Ensure summary.generate gets real context, not just the query
+        if token == "summary.generate":
+            return {**base, "text": task.raw_text, "query": task.user_query, "beliefs": session.belief_state}
         return {**base, "query": task.user_query}
+
     if "beliefs" in target:
         return {**base, "beliefs": session.belief_state}
+
     if "file path" in target or "pdf" in target or target == "":
         return {**base}
 
@@ -252,6 +266,7 @@ def _coerce_payload_for_tool(tool, payload: dict, task: UserTask) -> dict:
 
 def _format_capability_menu(tools: Dict[str, Any]) -> str:
     capability_hints = [
+        "- pdf.summarize: Handles full text summary of a paper or sections.",
         "- abstract.summarize: Summarize a paper quickly using the abstract (with fallback).",
         "- pdf.extract: Extracts structured text/sections from PDFs",
         "- equations: Extracts/handles LaTeX; can render as PNG (images) or as Unicode for console",
@@ -319,6 +334,29 @@ def _normalize_extraction_output(output: Any, task: "UserTask") -> None:
     task.raw_text = text
     task.cache = getattr(task, "cache", {})
     task.cache["extracted_text"] = text
+
+
+def _pick_precomputed_summary(intermediate_outputs: List[Dict[str, Any]]) -> str | None:
+    """
+    If any prior tool already produced a usable summary, return it to short-circuit
+    the final summarizer LLM pass. Prefer the most recent one.
+    """
+    summary_caps = {"pdf.summarize", "abstract.summarize"}
+    summary_tools = {"pdf_summarizer", "abstract_summary"}
+
+    for item in reversed(intermediate_outputs):
+        token = (item.get("capability") or "").strip().lower()
+        tool = (item.get("tool") or "").strip().lower()
+        out = item.get("output")
+
+        if token in summary_caps or tool in summary_tools:
+            # We expect a string summary from these tools
+            if isinstance(out, str):
+                clean = out.strip()
+                # Heuristic: ensure it's not trivially short or an [ERROR]
+                if clean and "[error]" not in clean.lower() and len(clean) >= 80:
+                    return clean
+    return None
 
 
 # --------------------------- Orchestration flow -------------------------------
@@ -459,6 +497,15 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
             continue
 
         input_data = _coerce_payload_for_tool(prof.tool, input_data, task)
+        expected_fields = _tool_expected_fields(prof.tool)
+        if (
+                prof.tool.name == "latex_console_renderer"
+                and "latex_string" in expected_fields
+                and not input_data.get("latex_string")
+        ):
+            logger.info("[Tool]: Skipping latex_console_renderer — no latex_string extracted; planner target was '%s'.",
+                        step.get("input_target"))
+            continue
         logger.info(f"[Tool]: Executing {prof.tool.name} for token '{token}' with inputs: {input_data}")
         try:
             output = await _ainvoke_structured_tool(prof.tool, input_data)
@@ -494,10 +541,15 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
             intermediate_outputs.append({"tool": prof.tool.name, "capability": token, "output": f"[ERROR] {e}"})
 
     # ----------------------- Step 3: Final summarization ---------------------
-    summary_prompt = build_summary_prompt(task, intermediate_outputs, session.belief_state, user_input)
-    resp_obj = summarizer_llm.invoke(summary_prompt)
-    response = getattr(resp_obj, "content", resp_obj)
-    response = str(response)
+    precomputed = _pick_precomputed_summary(intermediate_outputs)
+    if precomputed:
+        response = str(precomputed)
+        logger.info("[Orchestrator] Short-circuit: using precomputed summary from a tool.")
+    else:
+        summary_prompt = build_summary_prompt(task, intermediate_outputs, session.belief_state, user_input)
+        resp_obj = summarizer_llm.invoke(summary_prompt)
+        response = getattr(resp_obj, "content", resp_obj)
+        response = str(response)
 
     # ----------------------- Step 4: Belief update ---------------------------
     full_context = "\n".join([f"{m['role']}: {m['content']}" for m in session.conversation_history])

@@ -155,6 +155,7 @@ from app.tools.local.pdf_extractor import extract_pdf_text, LocalPdfExtractorInp
 from app.tools.local.equation_renderer import EquationRendererInput, LatexConsoleRendererInput, parse_latex_equation, render_equation
 from app.tools.local.summarizer_tool import GenerateSummaryInput, generate_summary
 from app.tools.local.abstract_extractor import abstract_summary as _abstract_summary_fn, AbstractSummaryInput
+from app.tools.local.pdf_summarizer import PdfSummarizeInput, pdf_summarize_adapter
 
 def _latex_console_renderer_adapter(latex_string: str) -> str:
     return parse_latex_equation(latex_string)
@@ -380,6 +381,27 @@ def initialize_tool_registry() -> ToolRegistry:
         requires_network=True,  # set True if your summarizer LLM is remote; set False if local
         cost_hint=CostHint.MEDIUM,  # LLM call cost
         latency_hint_ms=LatencyClass.MID.value,  # typically ~0.2–1s
+        latency_label="Mid",
+        cost_label="Mid",
+    ))
+
+    # --- Full-text PDF summarizer (capability: pdf.summarize) -----------
+    pdf_summarizer_tool = StructuredTool.from_function(
+        func=pdf_summarize_adapter,
+        name="pdf_summarizer",
+        description="Summarize arbitrary full text (already extracted from the PDF) into a concise overview.",
+        args_schema=PdfSummarizeInput,
+        return_direct=True
+    )
+    r.register_tool(ToolProfile(
+        tool=pdf_summarizer_tool,
+        purpose="Provide a concise, faithful summary of the full paper text.",
+        strengths="Works on any supplied text; yields consistent markdown summaries; controllable length.",
+        limitations="Quality depends on the quality/coverage of the provided text; may miss tables/figures not in text.",
+        capabilities=["pdf.summarize"],
+        requires_network=True,  # uses your remote summarizer LLM
+        cost_hint=CostHint.MEDIUM,  # adjust as you see fit
+        latency_hint_ms=LatencyClass.MID.value,
         latency_label="Mid",
         cost_label="Mid",
     ))
