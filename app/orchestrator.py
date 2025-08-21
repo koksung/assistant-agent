@@ -44,29 +44,193 @@ def build_tool_input(step: Dict, task: UserTask, session: ConversationContext) -
 
     # If the planner asked for an equation, try to extract one:
     if wants_single_eq:
-        # 1) Section-targeted extraction (unchanged)
-        if "section" in target:
+        # 0) Helper: pull first non-empty LaTeX from a list
+        def _first_nonempty(xs):
+            for x in xs or []:
+                s = (x or "").strip()
+                if s:
+                    return s
+            return ""
+
+        # 1) Section-targeted extraction (unchanged but a bit safer)
+        if "section" in target and getattr(task, "cache", None) and "extracted_struct" in task.cache:
             section_id = None
-            if m := re.search(r"section (\d+)", target, re.IGNORECASE):
+            if m := re.search(r"(?:section|sec)\.?\s+(\d+)", target, re.IGNORECASE):
                 section_id = m.group(1)
 
-            if section_id and getattr(task, "cache", None) and "extracted_struct" in task.cache:
-                sections = task.cache["extracted_struct"].get("sections", [])
-                target_section = next((s for s in sections if s.get("id") == section_id), None)
-                if target_section and "equations" in target_section:
-                    equations = target_section["equations"]
-                    latex = equations[0]["latex"] if equations else ""
+            sections = (task.cache["extracted_struct"] or {}).get("sections", [])
+            if section_id and isinstance(sections, list):
+                target_section = next((s for s in sections if str(s.get("id")) == str(section_id)), None)
+                if isinstance(target_section, dict):
+                    # Prefer explicit LaTeX list if present
+                    if "equations" in target_section and isinstance(target_section["equations"], list):
+                        # Support both [{"latex": "..."}] and ["..."]
+                        eq_objs = target_section["equations"]
+                        latexs = [e.get("latex") if isinstance(e, dict) else str(e) for e in eq_objs]
+                        latex = _first_nonempty(latexs)
+                        if latex:
+                            return {**base, "latex_string": latex}
+
+                    # Fallback: regex from section text/content
+                    sec_text = target_section.get("text") or target_section.get("content") or ""
+                    # Support $, $$, \( \), \[ \]
+                    m_inline = re.search(r"\$(.+?)\$", sec_text, re.DOTALL)
+                    m_disp = re.search(r"\$\$(.+?)\$\$", sec_text, re.DOTALL)
+                    m_paren = re.search(r"\\\((.+?)\\\)", sec_text, re.DOTALL)  # \( ... \)
+                    m_brack = re.search(r"\\\[(.+?)\\\]", sec_text, re.DOTALL)  # \[ ... \]
+                    latex = ""
+                    for m_ in (m_disp, m_inline, m_brack, m_paren):
+                        if m_ and m_.group(1).strip():
+                            latex = m_.group(1).strip()
+                            break
                     if latex:
                         return {**base, "latex_string": latex}
 
-        # 2) Generic fallback from raw_text (NOW runs even if no 'section' in target)
-        if getattr(task, "raw_text", ""):
-            equations = re.findall(r"\$\$([^$]+)\$\$|\$([^$]+)\$", task.raw_text)
-            if equations:
-                latex = equations[0][0] or equations[0][1]
+        # 2) Pull from full extracted_struct (anywhere), if available
+        if getattr(task, "cache", None) and "extracted_struct" in task.cache:
+            struct = task.cache["extracted_struct"] or {}
+            # (a) global equations list
+            if isinstance(struct.get("equations"), list):
+                eq_objs = struct["equations"]
+                latexs = [e.get("latex") if isinstance(e, dict) else str(e) for e in eq_objs]
+                latex = _first_nonempty(latexs)
                 if latex:
                     return {**base, "latex_string": latex}
-        # If we couldn't extract, we DON'T return yet — let other branches supply broader context.
+            # (b) scan section texts for math
+            if isinstance(struct.get("sections"), list):
+                for s in struct["sections"]:
+                    sec_text = (s.get("text") or s.get("content") or "") if isinstance(s, dict) else ""
+                    if not sec_text:
+                        continue
+                    m_disp = re.search(r"\$\$(.+?)\$\$", sec_text, re.DOTALL)
+                    m_inline = re.search(r"\$(.+?)\$", sec_text, re.DOTALL)
+                    m_paren = re.search(r"\\\((.+?)\\\)", sec_text, re.DOTALL)
+                    m_brack = re.search(r"\\\[(.+?)\\\]", sec_text, re.DOTALL)
+                    for m_ in (m_disp, m_inline, m_brack, m_paren):
+                        if m_ and m_.group(1).strip():
+                            return {**base, "latex_string": m_.group(1).strip()}
+
+        # 3) Fallback: scan cached plain extracted text (Nougat/Docling markdown) if present
+        if getattr(task, "cache", None) and "extracted_text" in task.cache:
+            t = task.cache["extracted_text"] or ""
+            # Support $, $$, \( \), \[ \]  (Nougat often escapes as \\( \\))
+            m_disp = re.search(r"\$\$(.+?)\$\$", t, re.DOTALL)
+            m_inline = re.search(r"(?<!\$)\$(.+?)\$(?!\$)", t, re.DOTALL)
+            m_paren = re.search(r"\\\((.+?)\\\)", t, re.DOTALL)
+            m_brack = re.search(r"\\\[(.+?)\\\]", t, re.DOTALL)
+            for m_ in (m_disp, m_inline, m_brack, m_paren):
+                if m_ and m_.group(1).strip():
+                    return {**base, "latex_string": m_.group(1).strip()}
+
+        # 4) Last resort: scan raw_text
+        if getattr(task, "raw_text", ""):
+            t = task.raw_text
+            m_disp = re.search(r"\$\$(.+?)\$\$", t, re.DOTALL)
+            m_inline = re.search(r"(?<!\$)\$(.+?)\$(?!\$)", t, re.DOTALL)
+            m_paren = re.search(r"\\\((.+?)\\\)", t, re.DOTALL)
+            m_brack = re.search(r"\\\[(.+?)\\\]", t, re.DOTALL)
+            for m_ in (m_disp, m_inline, m_brack, m_paren):
+                if m_ and m_.group(1).strip():
+                    return {**base, "latex_string": m_.group(1).strip()}
+
+    # ----------------- NEW: targeted text analysis (flexible narrowing) -----------------
+    if token in {"text.analyse", "text_analyser"}:
+        # Prefer richest text available
+        full_text = ""
+        if getattr(task, "cache", None) and "extracted_text" in task.cache:
+            full_text = task.cache["extracted_text"] or ""
+        if not full_text:
+            full_text = getattr(task, "raw_text", "") or ""
+
+        narrowed = full_text  # default
+        target_norm = (target or "").lower().strip()
+
+        # numeric like "section 3", "sec. 3"
+        section_hint_num = None
+        m_num = re.search(r"(?:section|sec)\.?\s+(\d+)", target_norm)
+        if m_num:
+            section_hint_num = m_num.group(1)
+
+        # semantic like "abstract", "related work", etc.
+        key_map = {
+            "abstract": "abstract",
+            "introduction": "introduction",
+            "related work": "related_work",
+            "background": "background",
+            "method": "method",
+            "methods": "method",
+            "methodology": "method",
+            "approach": "method",
+            "experiment": "experiments",
+            "experiments": "experiments",
+            "evaluation": "experiments",
+            "results": "experiments",
+            "discussion": "discussion",
+            "analysis": "discussion",
+            "conclusion": "conclusion",
+            "summary": "conclusion",
+            "references": "references",
+            "bibliography": "references",
+            "appendix": "appendix",
+        }
+        section_hint_key = None
+        for human, norm in key_map.items():
+            if human in target_norm:
+                section_hint_key = norm
+                break
+
+        # Try to narrow using structured output if present
+        if getattr(task, "cache", None) and "extracted_struct" in task.cache:
+            struct = task.cache["extracted_struct"]
+            if isinstance(struct, dict):
+                # Case A: remote extractors with list of sections and id/header/text
+                if isinstance(struct.get("sections"), list):
+                    if section_hint_num is not None:
+                        sec = next(
+                            (s for s in struct["sections"] if str(s.get("id")) == str(section_hint_num)),
+                            None
+                        )
+                        if sec:
+                            narrowed = (sec.get("text") or sec.get("content") or "").strip() or narrowed
+                    elif section_hint_key is not None:
+                        def _norm_hdr(h):
+                            h = (h or "").lower()
+                            for human, norm in key_map.items():
+                                if human in h:
+                                    return norm
+                            return h
+
+                        cand = next(
+                            (s for s in struct["sections"]
+                             if _norm_hdr(s.get("header") or s.get("title")) == section_hint_key),
+                            None
+                        )
+                        if cand:
+                            narrowed = (cand.get("text") or cand.get("content") or "").strip() or narrowed
+
+                # Case B: local extractor with normalized top-level keys
+                elif section_hint_key and isinstance(struct.get(section_hint_key), str):
+                    sec_txt = struct.get(section_hint_key, "").strip()
+                    if sec_txt:
+                        narrowed = sec_txt
+
+        # Build a concise context string from beliefs/preferences
+        belief = (session.belief_state or {}).get("belief", {}) or {}
+        prefs = (session.belief_state or {}).get("routing_ctx", {}).get("preferences", {}) or {}
+        ctx_lines = []
+        if isinstance(belief.get("preferences"), dict):
+            for pk, pv in belief["preferences"].items():
+                ctx_lines.append(f"{pk}: {pv}")
+        for pk, pv in prefs.items():
+            ctx_lines.append(f"{pk}: {pv}")
+        context_str = "\n".join(ctx_lines)
+
+        return {
+            **base,
+            "text": narrowed or full_text,
+            "query": task.user_query,
+            "context": context_str,
+        }
 
     if "raw text" in target or "extracted text" in target:
         if getattr(task, "cache", None) and "extracted_struct" in task.cache:
@@ -98,7 +262,8 @@ def build_summary_prompt(
         task: UserTask,
         intermediate_outputs: List[Dict[str, Any]],
         belief_state: Dict[str, Any],
-        user_input: str
+        user_input: str,
+        max_words: int=250
 ) -> str:
     # --- belief formatting ---
     belief = (belief_state or {}).get("belief", {})
@@ -113,13 +278,17 @@ def build_summary_prompt(
     ) or "Not specified"
 
     # Pull a compact paper digest if available
-    paper_digest = ""
     if getattr(task, "cache", None) and "extracted_text" in task.cache:
-        if "paper_digest" not in task.cache:
-            raw = task.cache["extracted_text"]
-            task.cache["paper_digest"] = raw[:1500] + (" …[truncated]" if len(raw) > 1500 else "")
-        paper_digest = task.cache["paper_digest"]
-    paper_digest_block = f"\n## Paper Digest (short)\n{paper_digest}\n" if paper_digest else ""
+        if task.raw_text:
+            text = task.raw_text
+            paper_digest = text[:4000] + (" …[truncated]" if len(text) > 4000 else "")
+            paper_digest_block = f"\n## Paper Digest\n{paper_digest}\n"
+        else:
+            if "paper_digest" not in task.cache:
+                raw = task.cache["extracted_text"]
+                task.cache["paper_digest"] = raw[:1500] + (" …[truncated]" if len(raw) > 1500 else "")
+            paper_digest = task.cache["paper_digest"]
+            paper_digest_block = f"\n## Paper Digest (short)\n{paper_digest}\n" if paper_digest else ""
 
     def _to_static_url(p: str) -> str:
         s = str(p).replace("\\", "/")
@@ -174,10 +343,16 @@ def build_summary_prompt(
     {intermediate_summary}
 
     ## Your Task
-    Write a clean, markdown-formatted summary of the paper. Include:
-    - Appropriate section headers (e.g., ## Abstract, ## Methodology)
-    - Highlights aligned with the user’s archetype
-    - Clear structure, precise explanations, and user-adaptive tone
+    Write a clear, flowing summary of this academic paper in natural English prose. 
+    
+    Focus on:
+    - What problem the paper addresses and why it matters
+    - The main approach or methodology used
+    - Key findings and contributions
+    - Significance and implications
+    
+    Write as a coherent narrative without section headers or bullet points. 
+    Aim for {max_words} words maximum.
 
     ### If Present — Paste This Markdown Block At The End (verbatim)
     {eq_section if eq_section else "(no previews provided)"}
@@ -255,6 +430,23 @@ def _coerce_payload_for_tool(tool, payload: dict, task: UserTask) -> dict:
     if "pdf_path" in expected and "pdf_path" not in data and getattr(task, "file_path", None):
         data["pdf_path"] = task.file_path
 
+    # --- NEW: auto-fill for text_analyser-like tools ---
+    if expected:
+        if "text" in expected and not data.get("text"):
+            text = ""
+            if getattr(task, "cache", None) and "extracted_text" in task.cache:
+                text = task.cache["extracted_text"] or ""
+            if not text:
+                text = getattr(task, "raw_text", "") or ""
+            if text:
+                data["text"] = text
+
+        if "query" in expected and not data.get("query"):
+            data["query"] = getattr(task, "user_query", "") or ""
+
+        if "context" in expected and not data.get("context"):
+            data["context"] = ""
+
     if expected and "text" in data and "text" not in expected:
         data.pop("text", None)
 
@@ -272,21 +464,23 @@ def _format_capability_menu(tools: Dict[str, Any]) -> str:
         "- equations: Extracts/handles LaTeX; can render as PNG (images) or as Unicode for console",
         "- layout: Emphasizes structural fidelity in complex layouts",
         "- summary.generate: Produce an adaptive summary from gathered context",
+        "- text.analyse: Answer targeted questions about specific parts of the text (e.g., most important equation, gist of section N, clarity of derivations, coverage of related work).",
     ]
-    # >>> NEW: teach the planner when it’s OK to name a specific tool
     concrete_guidance = (
         "\n### When to call concrete tools directly\n"
         "- Use 'latex_console_renderer' if the user wants console/CLI/plain-text/Unicode math.\n"
         "- Use 'equation_renderer' if the user wants rendered images/figures/previews.\n"
-        "Otherwise, use 'equations' as a capability and let the router decide."
+        "- Use 'text_analyser' if you need a targeted analysis on a specific subset of text.\n"
+        "Otherwise, use capabilities and let the router decide."
     )
     return (
-            "## Available Capabilities (router will choose the tool):\n"
-            + "\n".join(capability_hints)
-            + "\n\n## Concrete Tools (for your reference only — prefer capabilities):\n"
-            + format_tool_descriptions(tools)
-            + concrete_guidance
+        "## Available Capabilities (router will choose the tool):\n"
+        + "\n".join(capability_hints)
+        + "\n\n## Concrete Tools (for your reference only — prefer capabilities):\n"
+        + format_tool_descriptions(tools)
+        + concrete_guidance
     )
+
 
 
 # Robustly invoke a LangChain StructuredTool across versions
@@ -457,6 +651,7 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
     - equations
     - layout
     - summary.generate
+    - text.analyse
 
     Examples:
     Use 'pdf.summarize' on paper
@@ -464,6 +659,8 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
     Use 'equations' on extracted text
     Use 'latex_console_renderer' on the most important equation
     Use 'equation_renderer' on equations in section 2
+    Use 'text.analyse' on section 3 (clarity of derivations)
+    Use 'text.analyse' on related work section (coverage/comprehensiveness)
     Use 'summary.generate' on user query + tool outputs
     """.strip()
 

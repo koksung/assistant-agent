@@ -156,6 +156,7 @@ from app.tools.local.equation_renderer import EquationRendererInput, LatexConsol
 from app.tools.local.summarizer_tool import GenerateSummaryInput, generate_summary
 from app.tools.local.abstract_extractor import abstract_summary as _abstract_summary_fn, AbstractSummaryInput
 from app.tools.local.pdf_summarizer import PdfSummarizeInput, pdf_summarize_adapter
+from app.tools.local.text_analyser import TextAnalysisInput, analyze_text_adapter
 
 def _latex_console_renderer_adapter(latex_string: str) -> str:
     return parse_latex_equation(latex_string)
@@ -401,6 +402,27 @@ def initialize_tool_registry() -> ToolRegistry:
         capabilities=["pdf.summarize"],
         requires_network=True,  # uses your remote summarizer LLM
         cost_hint=CostHint.MEDIUM,  # adjust as you see fit
+        latency_hint_ms=LatencyClass.MID.value,
+        latency_label="Mid",
+        cost_label="Mid",
+    ))
+
+    # Text Analyser Tool
+    text_analyser_tool = StructuredTool.from_function(
+        func=analyze_text_adapter,
+        name="text_analyser",
+        description="Analyze specific parts of the paper text in response to targeted user questions (e.g., most important equation, gist of section, clarity of derivations, comprehensiveness of related work).",
+        args_schema=TextAnalysisInput,
+        return_direct=True
+    )
+    r.register_tool(ToolProfile(
+        tool=text_analyser_tool,
+        purpose="Provide focused answers about specific parts of a paper (sections, equations, derivations, related work).",
+        strengths="Handles fine-grained analysis, identifies important equations, evaluates clarity and coverage of sections.",
+        limitations="Relies on the quality of extracted text; may miss non-textual elements like figures/tables.",
+        capabilities=["text.analyse", "equations", "sections"],
+        requires_network=True,  # assumes LLM call
+        cost_hint=CostHint.MEDIUM,
         latency_hint_ms=LatencyClass.MID.value,
         latency_label="Mid",
         cost_label="Mid",
