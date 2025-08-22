@@ -1,6 +1,7 @@
 from typing import List, Dict, Any, Optional
 from pprint import pformat
 from pydantic import BaseModel, Field
+from app.belief_system import ARCH_KEYS
 from app.users.user_task import UserTask
 
 
@@ -100,9 +101,20 @@ def _merge_routing_ctx(current: Dict[str, Any], incoming: Dict[str, Any]) -> Dic
     return {"archetypes": cur_arch, "preferences": cur_p}
 
 
+def uniform_belief_state() -> Dict[str, Any]:
+    """Factory for a nested belief_state with uniform archetype_probs."""
+    n = max(1, len(ARCH_KEYS))
+    p = 1.0 / n
+    return {
+        "belief": {
+            "archetype_probs": {name: p for name in ARCH_KEYS}
+        }
+    }
+
+
 class ConversationContext(BaseModel):
     user_id: str
-    belief_state: Dict[str, Any] = Field(default_factory=dict)
+    belief_state: Dict[str, Any] = Field(default_factory=uniform_belief_state)
     conversation_history: List[Dict[str, str]] = Field(default_factory=list)
     task: Optional[UserTask] = None
 

@@ -107,26 +107,32 @@ def _heuristic_archetype_probs(text: str, prefs: Dict[str, Any]) -> Dict[str, fl
     s = sum(score.values())
     return {k: (v / s) if s > 0 else 1.0 / len(ARCH_KEYS) for k, v in score.items()}
 
-def update_beliefs(text_or_response: str, belief_updater_llm) -> Dict[str, Any]:
+def update_beliefs(text_or_response: str, curr_belief, belief_updater_llm) -> Dict[str, Any]:
     """
     Robust belief updater:
     - Tries LLM JSON
     - Falls back to heuristics for both prefs and archetype probs
     - Always returns non-empty 'belief' and 'routing_ctx'
     """
+    archetype_probs = curr_belief["belief"].get("archetype_probs", {})
+    current_belief_state = ", ".join(f"{k}:{v:.4f}" for k, v in archetype_probs.items())
+
     prompt = f"""
          You are a belief modeling assistant. Your task is to estimate how likely a user is to belong to each archetype,
     based on the input they've provided.
-    
-    Treat this as a probabilistic inference problem. For each archetype, estimate:
-        P(user_input | archetype) × P(archetype)
-    Assume a uniform prior across the 4 types. Output posterior probabilities.
-    
-    Archetypes:
-    - explorer: curious, open-ended, novelty-seeking
-    - deep_dive_analyst: detail-oriented, seeks technical depth
-    - summary_seeker: wants high-level summaries, avoids complexity
-    - math_oriented: prefers equations, derivations, or formalisms
+
+    TASK: Calculate posterior probabilities P(archetype|evidence) using Bayesian updating for each archetype:
+        P(archetype | user_input) = P(user_input | archetype) × P(archetype)
+       
+    For each archetype, assess:
+    1. LIKELIHOOD P(user_input|archetype): How likely would this archetype ask this specific question?
+       - math_oriented: High for equations, proofs, technical details, derivations, formalisms
+       - visual_learner: High for diagrams, figures, visual explanations, wants high-level summaries, avoids complexity
+       - explorer: High for overviews, abstracts, key points, curious, open-ended, novelty-seeking
+       - deep_dive_analyst: High for comprehensive analysis, thorough exploration, detail-oriented, seeks technical depth
+    2. PRIOR P(archetype): Use `current_belief_state` as prior
+    3. Calculate unnormalized posterior: likelihood × prior
+    4. NORMALIZE: Ensure all probabilities sum to 1.0
     
     Also infer preferences:
     - curious_about: key topics the user is interested in
@@ -155,6 +161,9 @@ def update_beliefs(text_or_response: str, belief_updater_llm) -> Dict[str, Any]:
       }}
     }}
     
+    current_belief_state:
+    {current_belief_state}
+    
     User input:
     \"\"\"{text_or_response}\"\"\"
     """.strip()
@@ -163,7 +172,7 @@ def update_beliefs(text_or_response: str, belief_updater_llm) -> Dict[str, Any]:
         raw_obj = belief_updater_llm.invoke(prompt)
         raw = getattr(raw_obj, "content", raw_obj)  # handle AIMessage
         parsed = raw if isinstance(raw, dict) else _safe_json_loads(_strip_code_fences(str(raw)))
-    except Exception:
+    except (Exception, ):
         parsed = None
 
     # Start with heuristics

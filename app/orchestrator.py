@@ -553,6 +553,122 @@ def _pick_precomputed_summary(intermediate_outputs: List[Dict[str, Any]]) -> str
     return None
 
 
+def build_orchestration_prompt(
+    user_input: str,
+    preview: str,
+    tools_desc: str,
+    formatted_archetypes: str,
+    formatted_prefs: str,
+    routing_tags: list[str] | None,
+    latency_budget_ms: int | None = None,
+    allow_remote: bool = True,
+    privacy_level: str = "standard",
+) -> str:
+    routing_tags = routing_tags or []
+    budget_line = (
+        f"- Latency budget: ≤ {latency_budget_ms} ms.\n" if latency_budget_ms is not None else ""
+    )
+    remote_line = (
+        "- Remote/network tools DISALLOWED (privacy or user setting).\n"
+        if (not allow_remote or privacy_level == "strict")
+        else "- Remote/network tools ALLOWED.\n"
+    )
+
+    return f"""
+    You are the MASTER ORCHESTRATOR for an academic paper assistant. Plan 1–4 actions (capabilities or specific tools) that best satisfy the user, **grounded in the belief profile** (archetype priors + preferences) and system constraints.
+    
+    ## Inputs
+    ### User Input
+    "{user_input}"
+    
+    ### Paper Preview (truncated)
+    {preview}
+    
+    ### Belief Profile (Priors)
+    - Archetypes (P(archetype)): 
+    {formatted_archetypes}
+    
+    - Stated/learned preferences:
+    {formatted_prefs}
+    
+    - Routing tags: {", ".join(routing_tags) if routing_tags else "(none)"}
+    
+    ### System Constraints
+    {budget_line}{remote_line}
+    
+    ## Capabilities (router will choose the concrete tool unless a concrete tool is explicitly allowed)
+    - pdf.summarize
+    - pdf.extract
+    - equations
+    - layout
+    - summary.generate
+    - text.analyse
+    
+    ### Concrete tools you MAY name directly (only if clearly needed):
+    - latex_console_renderer (console/Unicode equations)
+    - equation_renderer (image previews of equations)
+    - text_analyser (targeted analysis)
+    - pdf_summarizer (full-text summarization)
+    - abstract_summary (abstract-first summarization)
+    - local_pdf_extractor / advanced_pdf_extractor_1 / advanced_pdf_extractor_2 (only if you **must** force a specific extractor)
+    
+    ## Decision Policy (bind decisions to beliefs)
+    1) **Math-oriented (high prior ≥ 0.35 or top-1):**
+       - Early 'equations'. If user wants text/CLI → 'latex_console_renderer'; if images/previews → 'equation_renderer'.
+       - Then 'text.analyse' for key derivations, optionally 'summary.generate'.
+    2) **Summary-seeker (≥ 0.35 or top-1):**
+       - Prefer quick overview: 'abstract_summary' **or** 'pdf.summarize' (choose one).
+       - Then 'summary.generate' to tailor to preferences.
+    3) **Deep-dive analyst (≥ 0.35 or top-1):**
+       - 'pdf.extract' → 'text.analyse' on specific sections (methods/experiments).
+       - Consider 'equations' if document likely has math (beliefs or preview suggest it).
+    4) **Explorer (default/uncertain):**
+       - Start broad: 'pdf.summarize' or 'abstract_summary', then refine with 'text.analyse' if needed.
+    
+    ## Preference Overrides (if present, they trump archetype defaults)
+    - preferred_focus=math → include 'equations' early.
+    - preferred_focus=methods → include 'text.analyse' on method/approach section.
+    - depth_preference=high-level → skip deep tools; go straight to summary path.
+    - tone=concise → keep plan minimal (1–2 steps).
+    - routing tags:
+      - math_heavy → include 'equations'
+      - detail_oriented → include 'text.analyse'
+      - prefers_summary → prioritize 'abstract_summary' or 'pdf.summarize'
+    - doc_has_equations=True → include 'equations'
+    - has_complex_layout=True → lean on 'pdf.extract' with better layout handling.
+    
+    ## Cost/Latency/Privacy Rules
+    - If remote tools disallowed or privacy=strict → avoid tools requiring network.
+    - If latency budget is tight → prefer fewer steps and low-latency capabilities.
+    - If both a capability and a concrete tool fit, **prefer the capability** (router picks the tool).
+    - Avoid redundant steps (don’t call both 'abstract_summary' and 'pdf.summarize' unless justified).
+    
+    ## Output Format (STRICT)
+    Output ONLY the plan lines (no explanations, no numbering, no extra text).  
+    Each step on its own line:
+    Use '<capability_or_tool>' on <target>
+    
+    Allowed capability tokens ONLY:
+    - pdf.summarize
+    - pdf.extract
+    - equations
+    - layout
+    - summary.generate
+    - text.analyse
+    
+    Examples:
+    Use 'pdf.summarize' on paper
+    Use 'pdf.extract' on pdf
+    Use 'equations' on extracted text
+    Use 'latex_console_renderer' on the most important equation
+    Use 'equation_renderer' on equations in section 2
+    Use 'text.analyse' on related work section (coverage/comprehensiveness)
+    Use 'summary.generate' on user query + tool outputs
+    
+    Remember: **Use beliefs to justify your choices internally, but output ONLY the plan lines.**
+    """.strip()
+
+
 # --------------------------- Orchestration flow -------------------------------
 
 async def prepare_user_task(file, user_query: str, session: ConversationContext, llms: Dict[str, Any]):
@@ -573,7 +689,7 @@ async def prepare_user_task(file, user_query: str, session: ConversationContext,
     session.add_message("user", user_query)
 
     if not session.belief_state:
-        insight = update_beliefs(user_query, llms["belief_updater"])
+        insight = update_beliefs(user_query, session.belief_state, llms["belief_updater"])
         session.update_beliefs(insight)
 
     reg = get_registry()
@@ -607,62 +723,29 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
     # >>> NEW: nudge rendering mode based on *this round’s* user input
     _hint_equation_render_mode(user_input, session)
 
+    # -------------------------- Step 1: Plan via CoT -------------------------
     belief = (session.belief_state or {}).get("belief", {})
     archetypes = belief.get("archetype_probs", {}) or {}
     preferences = belief.get("preferences", {}) or {}
     formatted_archetypes = "\n".join(f"- {k}: {v:.2f}" for k, v in archetypes.items()) or "Unknown"
     formatted_prefs = "\n".join(f"- {k}: {v}" for k, v in preferences.items()) or "No explicit preferences"
+    routing_ctx = (session.belief_state or {}).get("routing_ctx", {}) or {}
+    routing_tags = routing_ctx.get("archetypes", []) or []
+    latency_budget = getattr(session, "latency_budget_ms", None)
+    allow_remote = getattr(session, "allow_remote", True)
+    privacy_level = getattr(session, "privacy_level", "standard")
 
-    # -------------------------- Step 1: Plan via CoT -------------------------
-    cot_prompt = f"""
-    You are a highly capable orchestration agent that can choose the right tools (via capabilities) to help a user
-    understand or summarize a scientific paper.
-
-    ## User Input
-    "{user_input}"
-
-    ## Paper Preview
-    {preview}
-
-    ## User Belief Profile
-    ### Archetype Probabilities
-    {formatted_archetypes}
-
-    ### Known Preferences
-    {formatted_prefs}
-
-    ## Instructions
-    - Think step-by-step and propose a short plan (1–4 steps).
-    - Prefer **capabilities** (NOT specific tools). The router will choose the concrete tool.
-    - If the user explicitly wants console/CLI/plain-text/Unicode math, you MAY call `latex_console_renderer` directly.
-    - If the user explicitly wants images/previews/figures of equations, you MAY call `equation_renderer` directly.
-    - Be adaptive: if the user is math-oriented, use 'equations' early; if summary-seeker, go straight to 'summary.generate'.
-    - Use the available capability names exactly.
-
-    {_format_capability_menu(tools)}
-
-    ## Output Format (must follow)
-    Write each step on its own line as:
-    Use '<capability_token_or_tool_name>' on <what to operate on>
-
-    Allowed capability tokens ONLY:
-    - pdf.summarize
-    - pdf.extract
-    - equations
-    - layout
-    - summary.generate
-    - text.analyse
-
-    Examples:
-    Use 'pdf.summarize' on paper
-    Use 'pdf.extract' on pdf
-    Use 'equations' on extracted text
-    Use 'latex_console_renderer' on the most important equation
-    Use 'equation_renderer' on equations in section 2
-    Use 'text.analyse' on section 3 (clarity of derivations)
-    Use 'text.analyse' on related work section (coverage/comprehensiveness)
-    Use 'summary.generate' on user query + tool outputs
-    """.strip()
+    cot_prompt = build_orchestration_prompt(
+        user_input=user_input,
+        preview=preview,
+        tools_desc=_format_capability_menu(tools),
+        formatted_archetypes=formatted_archetypes,
+        formatted_prefs=formatted_prefs,
+        routing_tags=routing_tags,
+        latency_budget_ms=latency_budget,
+        allow_remote=allow_remote,
+        privacy_level=privacy_level,
+    )
 
     plan_obj = orchestrator_llm.invoke(cot_prompt)
     plan_text = getattr(plan_obj, "content", plan_obj)
@@ -749,8 +832,9 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
         response = str(response)
 
     # ----------------------- Step 4: Belief update ---------------------------
+    logger.info(f"Belief distribution: {session.belief_state}")
     full_context = "\n".join([f"{m['role']}: {m['content']}" for m in session.conversation_history])
-    new_insight = update_beliefs(full_context, llms["belief_updater"])
+    new_insight = update_beliefs(full_context, session.belief_state, llms["belief_updater"])
     session.update_beliefs(new_insight)
     session.add_message("summarizer", response)
 
