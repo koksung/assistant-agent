@@ -167,22 +167,8 @@ def _extract_pdf_text_adapter(pdf_path: str, **kwargs):
     return extract_pdf_text(pdf_path)
 
 
-def _equation_renderer_adapter(
-    markdown_text: str = "",
-    pdf_path: str = "",
-    include_inline: bool = False,
-    out_dir: str = "data/latex_equations",
-    dpi: int = 300,
-    fontsize: int = 20,
-):
-    payload = EquationRendererInput(
-        markdown_text=markdown_text,
-        pdf_path=pdf_path,
-        include_inline=include_inline,
-        out_dir=out_dir,
-        dpi=dpi,
-        fontsize=fontsize,
-    )
+def _equation_renderer_adapter(**kwargs):
+    payload = EquationRendererInput(**kwargs)
     return render_equation(payload)
 
 

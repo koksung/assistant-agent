@@ -67,7 +67,7 @@ async def main():
     parser.add_argument("--pdf", default="data/ddpm.pdf", help="Path to the PDF (round 1).")
     parser.add_argument("--q1", default="Give me an initial high-level summary of this paper.",
                         help="Round 1 user query.")
-    parser.add_argument("--q2", default="Summarize methodology and key equations.",
+    parser.add_argument("--q2", default="Show me the most important key equation in the paper.",
                         help="Round 2 user query (follow-up).")
     parser.add_argument("--q3", default="Now focus on the math details and derivations. "
                                         "I prefer concise math-first summaries focusing on derivations; I’m familiar with diffusion models.",

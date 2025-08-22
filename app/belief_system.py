@@ -1,4 +1,3 @@
-# app/belief_system.py
 from __future__ import annotations
 
 import json, re
@@ -20,12 +19,12 @@ def _strip_code_fences(s: str) -> str:
 def _safe_json_loads(s: str) -> Dict[str, Any] | None:
     try:
         return json.loads(s)
-    except Exception:
+    except (Exception, ):
         m = re.search(r"\{.*\}", s, flags=re.DOTALL)
         if m:
             try:
                 return json.loads(m.group(0))
-            except Exception:
+            except (Exception, ):
                 return None
         return None
 

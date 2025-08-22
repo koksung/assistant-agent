@@ -26,17 +26,18 @@ plt.rcParams.update({
 
 # ---------------------------- Pydantic schema -----------------------------
 
+# --- add to the Pydantic schema ---
 class EquationRendererInput(BaseModel):
-    """
-    Args schema for the StructuredTool.
-    - If `markdown_text` is empty and you pass `pdf_path`, we will call Nougat to get markdown first.
-    """
-    markdown_text: str = Field("", description="Markdown text potentially containing LaTeX math (\\[...\\] or \\(...\\)).")
-    pdf_path: str = Field("", description="Optional: PDF path to run through Nougat when markdown_text is empty.")
-    include_inline: bool = Field(default=False, description="Also extract inline equations \\(...\\).")
-    out_dir: str = Field(default="data/latex_equations", description="Output directory for rendered PNGs.")
-    dpi: int = Field(default=300, ge=72, le=600, description="PNG DPI.")
-    fontsize: int = Field(default=20, ge=6, le=64, description="Font size for rendering.")
+    markdown_text: str = Field("", description="Markdown with LaTeX (\\[...\\] or \\(...\\)).")
+    pdf_path: str = Field("", description="Optional PDF path to run Nougat if markdown_text is empty.")
+    include_inline: bool = Field(default=False, description="Also extract \\(...\\).")
+    out_dir: str = Field(default="data/latex_equations")
+    dpi: int = Field(default=300, ge=72, le=600)
+    fontsize: int = Field(default=20, ge=6, le=64)
+    latex_string: Optional[str] = Field(default=None, description="Render only this single LaTeX equation.")
+    max_images: int = Field(default=8, ge=1, le=50, description="Maximum number of images to return.")
+    equations_top_k: int = Field(default=0, ge=0, le=50,
+                                 description="If >0 and latex_string is not set, only render the top-k extracted equations.")
 
 
 class LatexConsoleRendererInput(BaseModel):
@@ -82,11 +83,11 @@ def _latex_str_hash(latex_str: str) -> str:
 def _sanitize_latex_for_matplotlib(eqn: str) -> str:
     """
     Sanitize/normalize Nougat-extracted LaTeX for Matplotlib's usetex/mathtools.
-    - Remove \tag{...}
-    - Normalize \coloneqq
+    - Remove \\tag{...}
+    - Normalize \\coloneqq
     - Collapse stray spaces around subscripts/superscripts
     - Normalize \\mathbf{ ... } spacing
-    - Replace \qty delimiters (physics) with \left...\right... so it also works if physics is absent
+    - Replace \\qty delimiters (physics) with \\left...\\right... so it also works if physics is absent
     - Trim trailing slashes/spaces and collapse stray backslashes
     """
     if not isinstance(eqn, str):
@@ -205,35 +206,36 @@ def parse_latex_equation(latex_str: str) -> str:
         return f"Parsing error: {str(e)}"
 
 
-def render_equation_images(
-    markdown_text: str,
-    out_dir: str = "data/latex_equations",
-    include_inline: bool = False,
-    dpi: int = 300,
-    fontsize: int = 20
-) -> Dict[str, Any]:
-    """
-    Core renderer (callable directly if you don't need Nougat).
-    Returns: {"count": int, "images": [paths], "failed": [latex_snippets]}
-    """
+
+def render_equation_images(markdown_text: str, out_dir: str = "data/latex_equations",
+                           include_inline: bool = False, dpi: int = 300, fontsize: int = 20,
+                           max_images: int = 8) -> Dict[str, Any]:
     equations = _extract_latex_equations(markdown_text or "", include_inline=include_inline)
-    images: List[str] = []
-    failed: List[str] = []
+    images, failed = [], []
     for eq in equations:
+        if len(images) >= max_images:   # 👈 cap
+            break
         try:
             images.append(_render_single_equation(eq, out_dir=out_dir, dpi=dpi, fontsize=fontsize))
         except Exception as e:
-            # Log sanitized snippet to help debugging
             logger.exception(f"[equation_renderer] Failed to render: {eq} | {e}")
             failed.append(eq)
     return {"count": len(images), "images": images, "failed": failed}
 
 
 def render_equation(md_input: EquationRendererInput) -> Dict[str, Any]:
-    """
-    StructuredTool entrypoint.
-    If `markdown_text` is empty and `pdf_path` is provided, calls Nougat first to get markdown.
-    """
+    # Single-equation fast path
+    if md_input.latex_string:
+        single_md = f"\\[{_sanitize_latex_for_matplotlib(md_input.latex_string)}\\]"
+        return render_equation_images(
+            markdown_text=single_md,
+            out_dir=md_input.out_dir,
+            include_inline=False,
+            dpi=md_input.dpi,
+            fontsize=md_input.fontsize,
+            max_images=1,  # force single
+        )
+
     md = md_input.markdown_text
     if not md and md_input.pdf_path:
         try:
@@ -245,10 +247,29 @@ def render_equation(md_input: EquationRendererInput) -> Dict[str, Any]:
     if not md:
         return {"count": 0, "images": [], "failed": [], "error": "No markdown_text provided and no pdf_path to derive it."}
 
+    # If we have full markdown and want only top-k, trim before rendering
+    if md and not md_input.latex_string and getattr(md_input, "equations_top_k", 0) > 0:
+        eqs_all = _extract_latex_equations(md, include_inline=md_input.include_inline)
+
+        # Simple importance heuristic: losses/objectives first, then longer eqs
+        def _score(s: str) -> int:
+            s2 = s.lower()
+            return (
+                    5 * any(k in s2 for k in ["\\mathcal{l}", "loss", "objective", "\\mathrm{kl}", "elbo"])
+                    + 3 * any(k in s2 for k in ["\\sum", "\\prod", "\\int", "\\log", "\\mathbb{e}"])
+                    + min(len(s), 120) // 20
+            )
+
+        topk = sorted(eqs_all, key=_score, reverse=True)[: md_input.equations_top_k]
+        # Rebuild minimal markdown containing only the chosen equations
+        md = "".join([f"\\[{_sanitize_latex_for_matplotlib(e)}\\]\n" for e in topk])
+
     return render_equation_images(
         markdown_text=md,
         out_dir=md_input.out_dir,
         include_inline=md_input.include_inline,
         dpi=md_input.dpi,
         fontsize=md_input.fontsize,
+        max_images=md_input.max_images,  # respect cap
     )
+

@@ -317,8 +317,45 @@ def build_summary_prompt(
 
     eq_section = ""
     if eq_imgs:
-        previews = "\n".join(f"![Equation]({_to_static_url(p)})" for p in eq_imgs[:8])
+        # Respect routing hint for top-k equations if present
+        bs_prefs = (belief_state or {}).get("routing_ctx", {}).get("preferences", {}) or {}
+        eq_top_k = 1 if bs_prefs.get("equations_top_k") == 1 else 8
+        previews = "\n".join(f"![Equation]({_to_static_url(p)})" for p in eq_imgs[:eq_top_k])
         eq_section = f"\n## Rendered Equation Previews\n{previews}\n"
+
+    single_eq_intent = any(
+        phrase in user_input.lower()
+        for phrase in [
+            "most important equation", "main equation", "key equation",
+            "single equation", "one equation",
+            "cool equation", "highlight equation",
+            "interesting equation", "surprise me"
+        ]
+    )
+    if single_eq_intent:
+        task_instructions = f"""
+        ## Your Task
+        The user asked for the **most important equation**. Provide a concise explanation focused on the **selected equation** shown below:
+        - Name what the equation represents (e.g., training objective/ELBO/KL/loss).
+        - Explain each major symbol at a high level (keep it brief).
+        - State **why** this equation is central to the paper’s method.
+        - Connect it to the training or inference procedure (1–2 sentences).
+        Keep it under 120 words. Do not add unrelated summary content.
+        """
+    else:
+        task_instructions = f"""
+        ## Your Task
+        Write a clear, flowing summary of this academic paper in natural English prose. 
+
+        Focus on:
+        - What problem the paper addresses and why it matters
+        - The main approach or methodology used
+        - Key findings and contributions
+        - Significance and implications
+
+        Write as a coherent narrative without section headers or bullet points. 
+        Aim for {max_words} words maximum.
+        """
 
     return f"""
     You are an academic research assistant helping summarize scientific papers.
@@ -333,7 +370,8 @@ def build_summary_prompt(
 
     ### User Preferences
     {formatted_preferences}
-
+    
+    ## academic paper content
     {paper_digest_block}
 
     ## Tools Chosen by Router
@@ -342,17 +380,7 @@ def build_summary_prompt(
     ## Tool Outputs for Reference
     {intermediate_summary}
 
-    ## Your Task
-    Write a clear, flowing summary of this academic paper in natural English prose. 
-    
-    Focus on:
-    - What problem the paper addresses and why it matters
-    - The main approach or methodology used
-    - Key findings and contributions
-    - Significance and implications
-    
-    Write as a coherent narrative without section headers or bullet points. 
-    Aim for {max_words} words maximum.
+    {task_instructions}
 
     ### If Present — Paste This Markdown Block At The End (verbatim)
     {eq_section if eq_section else "(no previews provided)"}
@@ -381,16 +409,27 @@ def _hint_equation_render_mode(user_input: str, session: ConversationContext) ->
     text = (user_input or "").lower()
     want_console = any(w in text for w in ["console", "cli", "unicode", "plain text", "text-only", "terminal"])
     want_images = any(w in text for w in ["image", "png", "figure", "render", "preview", "visual"])
+    # broaden single-equation detection
+    single_intent = any(w in text for w in [
+        "most important equation", "main equation", "key equation", "single equation", "one equation",
+        "cool equation", "highlight equation", "interesting equation", "surprise me"
+    ])
+
     belief_state = session.belief_state or {}
     rc = belief_state.get("routing_ctx", {}) or {}
     prefs = dict(rc.get("preferences", {}) or {})
+
     if want_console:
         prefs["prefer_console_equations"] = True
     if want_images:
         prefs["prefer_image_equations"] = True
+    if single_intent:
+        prefs["equations_top_k"] = 1   # 👈 hint to the tool path
+
     rc["preferences"] = prefs
     belief_state["routing_ctx"] = rc
     session.belief_state = belief_state
+
 
 
 def _enhance_doc_prefs_with_preview(session: ConversationContext, preview_text: str) -> None:
@@ -423,14 +462,76 @@ def _tool_expected_fields(tool) -> set[str]:
     return set()
 
 
+# orchestrator.py
 def _coerce_payload_for_tool(tool, payload: dict, task: UserTask) -> dict:
     expected = _tool_expected_fields(tool)
     data = dict(payload)
 
+    # ensure pdf_path if expected
     if "pdf_path" in expected and "pdf_path" not in data and getattr(task, "file_path", None):
         data["pdf_path"] = task.file_path
 
-    # --- NEW: auto-fill for text_analyser-like tools ---
+    # ---------------- SINGLE-EQ SAFETY NET ----------------
+    # If user intent says "top_k=1" and we're about to call equation_renderer without a latex_string,
+    # try to pick ONE equation from cache and set a hard cap.
+    try:
+        if tool.name == "equation_renderer":
+            # prefer the belief routing prefs
+            prefs = ((task.session.belief_state if hasattr(task, "session") else {}) or {}).get("routing_ctx", {}).get("preferences", {})  # may be empty
+            # Also pass equations_top_k to the tool if available
+            if prefs.get("equations_top_k") and "equations_top_k" in expected:
+                data["equations_top_k"] = int(prefs["equations_top_k"])
+            # if task doesn't hold session, get from global? we can pass it via closure; fallback to payload hint:
+            want_one = False
+            # payload may carry hint in context; or use a safer global check via 'equations_top_k' you set earlier:
+            bs = getattr(task, "session", None).belief_state if getattr(task, "session", None) else {}
+            rc_prefs = (bs or {}).get("routing_ctx", {}).get("preferences", {}) if bs else {}
+            want_one = (rc_prefs.get("equations_top_k") == 1) or prefs.get("equations_top_k") == 1
+
+            if "max_images" in expected and want_one:
+                data["max_images"] = 1
+
+            if want_one and "latex_string" in expected and not data.get("latex_string"):
+                # Heuristic: pick a single equation from extracted_struct or extracted_text
+                chosen = None
+                struct = getattr(task, "cache", {}).get("extracted_struct") if getattr(task, "cache", None) else None
+                if isinstance(struct, dict):
+                    # 1) global equations list (Nougat/Docling)
+                    eqs = struct.get("equations") if isinstance(struct.get("equations"), list) else []
+                    cand = []
+                    for e in eqs:
+                        s = (e.get("latex") if isinstance(e, dict) else str(e)).strip()
+                        if s:
+                            cand.append(s)
+                    # rank a bit: prefer losses/objectives, then longer ones
+                    def _score(s: str) -> int:
+                        s2 = s.lower()
+                        return (
+                            5 * any(k in s2 for k in ["\\mathcal{l}", "loss", "objective"])
+                            + 3 * any(k in s2 for k in ["\\sum", "kl", "divergence"])
+                            + min(len(s), 120) // 20  # length heuristic
+                        )
+                    if cand:
+                        chosen = sorted(cand, key=_score, reverse=True)[0]
+
+                # 2) fallback: scan extracted_text
+                if not chosen and getattr(task, "cache", None) and "extracted_text" in task.cache:
+                    t = task.cache["extracted_text"] or ""
+                    for rx in (r"\$\$(.+?)\$\$", r"\\\[(.+?)\\\]", r"(?<!\$)\$(.+?)\$(?!\$)", r"\\\((.+?)\\\)"):
+                        m = re.search(rx, t, re.DOTALL)
+                        if m and m.group(1).strip():
+                            chosen = m.group(1).strip()
+                            break
+
+                if chosen:
+                    data["latex_string"] = chosen
+                    # when we set latex_string, remove pdf_path to avoid whole-PDF rendering
+                    if "pdf_path" in data:
+                        data.pop("pdf_path", None)
+    except (Exception, ):
+        pass
+    # ------------------------------------------------------
+    # existing autofills
     if expected:
         if "text" in expected and not data.get("text"):
             text = ""
@@ -447,12 +548,8 @@ def _coerce_payload_for_tool(tool, payload: dict, task: UserTask) -> dict:
         if "context" in expected and not data.get("context"):
             data["context"] = ""
 
-    if expected and "text" in data and "text" not in expected:
-        data.pop("text", None)
-
     if expected:
         data = {k: v for k, v in data.items() if k in expected}
-
     return data
 
 
@@ -789,6 +886,30 @@ async def conversation_loop(user_input: str, task: UserTask, session: Conversati
         logger.info(f"[Tool]: Executing {prof.tool.name} for token '{token}' with inputs: {input_data}")
         try:
             output = await _ainvoke_structured_tool(prof.tool, input_data)
+
+            if prof.tool.name == "text_analyser" and isinstance(output, dict) and output.get("latex_string"):
+                try:
+                    eq_prof = reg.get_tool("equation_renderer") if reg else None
+                    if eq_prof:
+                        rendered = await _ainvoke_structured_tool(
+                            eq_prof.tool,
+                            {"latex_string": output["latex_string"]}
+                        )
+                        # Keep analyser’s explanation + rendered image together
+                        intermediate_outputs.append({
+                            "tool": "equation_renderer",
+                            "capability": "equations",
+                            "output": {
+                                "analysis": output.get("analysis", ""),
+                                "images": (rendered or {}).get("images", []),
+                                "count": (rendered or {}).get("count", 0),
+                            }
+                        })
+                        # We’re done with this step; skip the default append below
+                        continue
+                except Exception as e:
+                    logger.exception(f"[Orchestrator] Auto-render from text_analyser latex_string failed: {e}")
+
             digest_output = output
             if _is_extractor(prof.tool.name):
                 try:
